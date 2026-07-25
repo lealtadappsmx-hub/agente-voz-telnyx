@@ -313,146 +313,138 @@ async def enviar_audio_gemini_a_telnyx(
     session,
 ):
     """
-    Recibe audio PCM de Gemini, lo convierte a PCMU
-    y lo reproduce en la llamada de Telnyx.
+    Recibe continuamente el audio PCM de Gemini,
+    lo convierte a PCMU y lo reproduce en Telnyx.
     """
 
     estado_resampleo = None
-
     buffer_pcmu = bytearray()
 
     # 160 bytes equivalen a 20 milisegundos
     # de audio PCMU a 8 kHz.
     tamano_paquete = 160
 
-    async for respuesta in session.receive():
-        contenido = respuesta.server_content
+    while True:
+        async for respuesta in session.receive():
+            contenido = respuesta.server_content
 
-        if not contenido:
-            continue
+            if not contenido:
+                continue
 
-        # Permite que la persona interrumpa al agente.
-        if contenido.interrupted:
-            buffer_pcmu.clear()
+            # Permite que la persona interrumpa al agente.
+            if contenido.interrupted:
+                buffer_pcmu.clear()
+                estado_resampleo = None
 
-            estado_resampleo = None
-
-            await websocket.send_json(
-                {
-                    "event": "clear"
-                }
-            )
-
-            print(
-                "La persona interrumpió al agente. "
-                "Audio pendiente cancelado."
-            )
-
-        turno = contenido.model_turn
-
-        if turno and turno.parts:
-            for parte in turno.parts:
-                datos = parte.inline_data
-
-                if not datos:
-                    continue
-
-                if not datos.data:
-                    continue
-
-                # Gemini entrega audio PCM a 24 kHz.
-                audio_pcm_24khz = datos.data
-
-                # Convertir de 24 kHz a 8 kHz.
-                (
-                    audio_pcm_8khz,
-                    estado_resampleo,
-                ) = audioop.ratecv(
-                    audio_pcm_24khz,
-                    2,
-                    1,
-                    24000,
-                    8000,
-                    estado_resampleo,
+                await websocket.send_json(
+                    {
+                        "event": "clear"
+                    }
                 )
 
-                # Convertir PCM a PCMU para Telnyx.
-                audio_pcmu = audioop.lin2ulaw(
-                    audio_pcm_8khz,
-                    2,
+                print(
+                    "La persona interrumpió al agente. "
+                    "Audio pendiente cancelado."
                 )
 
-                buffer_pcmu.extend(
-                    audio_pcmu
-                )
+            turno = contenido.model_turn
 
-                while (
-                    len(buffer_pcmu)
-                    >= tamano_paquete
-                ):
-                    paquete = bytes(
-                        buffer_pcmu[
-                            :tamano_paquete
-                        ]
+            if turno and turno.parts:
+                for parte in turno.parts:
+                    datos = parte.inline_data
+
+                    if not datos:
+                        continue
+
+                    if not datos.data:
+                        continue
+
+                    # Gemini entrega audio PCM a 24 kHz.
+                    audio_pcm_24khz = datos.data
+
+                    # Convertir el audio de 24 kHz a 8 kHz.
+                    (
+                        audio_pcm_8khz,
+                        estado_resampleo,
+                    ) = audioop.ratecv(
+                        audio_pcm_24khz,
+                        2,
+                        1,
+                        24000,
+                        8000,
+                        estado_resampleo,
                     )
 
-                    del buffer_pcmu[
-                        :tamano_paquete
-                    ]
+                    # Convertir PCM a PCMU para Telnyx.
+                    audio_pcmu = audioop.lin2ulaw(
+                        audio_pcm_8khz,
+                        2,
+                    )
 
-                    paquete_base64 = (
-                        base64.b64encode(
-                            paquete
-                        ).decode(
-                            "ascii"
+                    buffer_pcmu.extend(
+                        audio_pcmu
+                    )
+
+                    while len(buffer_pcmu) >= tamano_paquete:
+                        paquete = bytes(
+                            buffer_pcmu[:tamano_paquete]
                         )
-                    )
 
-                    await websocket.send_json(
-                        {
-                            "event": "media",
-                            "media": {
-                                "payload": (
-                                    paquete_base64
-                                )
-                            },
-                        }
-                    )
+                        del buffer_pcmu[:tamano_paquete]
 
-        # Enviar cualquier audio que quede al finalizar
-        # la respuesta de Gemini.
-        if contenido.turn_complete and buffer_pcmu:
-            faltan = (
-                tamano_paquete
-                - len(buffer_pcmu)
-            )
+                        paquete_base64 = (
+                            base64.b64encode(
+                                paquete
+                            ).decode(
+                                "ascii"
+                            )
+                        )
 
-            if faltan > 0:
-                # FF representa silencio en PCMU.
-                buffer_pcmu.extend(
-                    b"\xff" * faltan
+                        await websocket.send_json(
+                            {
+                                "event": "media",
+                                "media": {
+                                    "payload": paquete_base64
+                                },
+                            }
+                        )
+
+            # Enviar cualquier audio restante
+            # cuando Gemini termine de hablar.
+            if contenido.turn_complete and buffer_pcmu:
+                faltan = (
+                    tamano_paquete
+                    - len(buffer_pcmu)
                 )
 
-            paquete_base64 = (
-                base64.b64encode(
-                    bytes(buffer_pcmu)
-                ).decode(
-                    "ascii"
+                if faltan > 0:
+                    buffer_pcmu.extend(
+                        b"\xff" * faltan
+                    )
+
+                paquete_base64 = (
+                    base64.b64encode(
+                        bytes(buffer_pcmu)
+                    ).decode(
+                        "ascii"
+                    )
                 )
-            )
 
-            await websocket.send_json(
-                {
-                    "event": "media",
-                    "media": {
-                        "payload": paquete_base64
-                    },
-                }
-            )
+                await websocket.send_json(
+                    {
+                        "event": "media",
+                        "media": {
+                            "payload": paquete_base64
+                        },
+                    }
+                )
 
-            buffer_pcmu.clear()
+                buffer_pcmu.clear()
 
-
+                print(
+                    "Gemini terminó un turno. "
+                    "Esperando la siguiente respuesta."
+                )
 # ---------------------------------------------------------
 # WEBSOCKET: PUENTE TELNYX ↔ GEMINI
 # ---------------------------------------------------------
