@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+pipecat-ai
+pipecat-ai[telnyx]
+google-genai
