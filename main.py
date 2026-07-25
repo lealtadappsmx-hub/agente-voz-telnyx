@@ -68,7 +68,50 @@ async def telnyx_webhook(request: Request, background_tasks: BackgroundTasks):
         print(f"Error procesando el webhook de Telnyx: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+@app.websocket("/media")
+async def websocket_audio_telnyx(websocket: WebSocket):
+    await websocket.accept()
 
+    print("TELNYX ABRIO EL WEBSOCKET /media")
+
+    paquetes_audio = 0
+
+    try:
+        while True:
+            mensaje = await websocket.receive_json()
+            evento = mensaje.get("event")
+
+            if evento == "connected":
+                print("Evento WebSocket recibido: connected")
+
+            elif evento == "start":
+                datos_inicio = mensaje.get("start", {})
+                formato = datos_inicio.get("media_format", {})
+
+                print("Evento WebSocket recibido: start")
+                print(f"Formato de audio recibido: {formato}")
+
+            elif evento == "media":
+                paquetes_audio += 1
+
+                if paquetes_audio == 1 or paquetes_audio % 50 == 0:
+                    print(
+                        f"Audio recibido desde Telnyx: "
+                        f"{paquetes_audio} paquetes"
+                    )
+
+            elif evento == "stop":
+                print("Telnyx detuvo el streaming de audio")
+                break
+
+            elif evento == "error":
+                print(f"Error WebSocket de Telnyx: {mensaje}")
+
+    except WebSocketDisconnect:
+        print("WebSocket de Telnyx desconectado")
+
+    except Exception as error:
+        print(f"Error procesando audio de Telnyx: {error}")
 @app.get("/")
 async def root():
     return {"status": "Servidor de LealtadApps activo y operativo"}
