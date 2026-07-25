@@ -1,5 +1,4 @@
 fastapi
 uvicorn
-pipecat-ai
-pipecat-ai[telnyx]
+httpx
 google-genai
