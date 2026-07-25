@@ -24,20 +24,25 @@ async def contestar_llamada_telnyx(call_control_id: str):
         "Authorization": f"Bearer {telnyx_api_key}",
         "Content-Type": "application/json"
     }
-    async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient() as client:
         try:
-           response = await client.post(
-    url,
-    headers=headers,
-    json={
-        "stream_url": "wss://vozagent.lealtadapps.com/media",
-        "stream_track": "inbound_track",
-        "stream_codec": "PCMU",
-        "stream_bidirectional_mode": "rtp",
-        "stream_bidirectional_codec": "PCMU"
-    }
-)
-            print(f"Respuesta de Telnyx al contestar la llamada: {response.status_code} - {response.text}")
+            response = await client.post(
+                url,
+                headers=headers,
+                json={
+                    "stream_url": "wss://vozagent.lealtadapps.com/media",
+                    "stream_track": "inbound_track",
+                    "stream_codec": "PCMU",
+                    "stream_bidirectional_mode": "rtp",
+                    "stream_bidirectional_codec": "PCMU"
+                }
+            )
+
+            print(
+                f"Respuesta de Telnyx al contestar la llamada: "
+                f"{response.status_code} - {response.text}"
+            )
+
         except Exception as e:
             print(f"Error al conectar con la API de Telnyx: {e}")
 
