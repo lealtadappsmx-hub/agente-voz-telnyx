@@ -4,11 +4,11 @@ import asyncio
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-# --- Librerías del Cerebro (Pipecat y Gemini) ---
+# --- Librerías del Cerebro (Pipecat y Gemini con ruta corregida) ---
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.transports.services.telnyx import TelnyxTransport, TelnyxParams
+from pipecat.transports.network.telnyx import TelnyxTransport, TelnyxParams
 from pipecat.services.gemini_multimodal_live.gemini import GeminiMultimodalLiveLLMService
 from pipecat.processors.aggregators.llm_response import LLMAssistantResponseAggregator
 from pipecat.processors.aggregators.llm_user_context import LLMUserContextAggregator
@@ -16,14 +16,14 @@ from pipecat.processors.aggregators.llm_user_context import LLMUserContextAggreg
 app = FastAPI()
 
 # --- 1. LA PERSONALIDAD DE TU AGENTE (SYSTEM PROMPT) ---
-# Aquí le decimos a Gemini quién es y cómo debe comportarse.
+# Respetando fielmente tu prompt de cerrador de ventas experto de Los Mochis
 SYSTEM_PROMPT = """Eres el cerrador de ventas estrella y representante de LealtadApps, operando desde Los Mochis, Sinaloa. 
 Tu objetivo principal es hacer ventas en frío, captar el interés de los negocios y cerrar tratos por teléfono.
 IMPORTANTE: Habla SIEMPRE en español con un acento mexicano muy natural. Sé extremadamente carismático, persuasivo, amigable y empático. Utiliza un tono conversacional de México (ej. "claro que sí", "qué tal", "con muchísimo gusto").
 Ofrecemos soluciones de software que hacen crecer a los negocios: tarjetas de sellos digitales, aplicaciones de cashback y CRMs a la medida. Tu meta es convencerlos de que estas herramientas les harán ganar más dinero y retener a sus clientes.
 REGLA DE ORO SOBRE TU IDENTIDAD: Si el prospecto te pregunta si eres un robot, bot o inteligencia artificial, NUNCA des una respuesta robótica. En su lugar, bromea de forma ligera y amigable. Diles algo como que eres un "Ejecutivo de Ventas Inteligente" de nueva generación, y que la ventaja es que te pueden marcar a cualquier hora porque no tomas vacaciones ni pausas para el café. Haz que suene simpático y humano.
 Tus respuestas deben ser siempre muy breves, directas al punto y diseñadas para una llamada telefónica fluida (evita listas o monólogos largos). Mantén el control de la conversación haciendo preguntas cortas para entender las necesidades de su negocio.
-Si preguntan por detalles técnicos de programación que no sepas, ofrece tomar sus datos para que un desarrollador humano de tu equipo los contacte de inmediato."""
+If preguntan por detalles técnicos de programación que no sepas, ofrece tomar sus datos para que un desarrollador humano de tu equipo los contacte de inmediato."""
 
 # --- 2. EL MOTOR DE INTELIGENCIA (PIPELINE) ---
 async def iniciar_agente_pipecat(call_control_id: str):
