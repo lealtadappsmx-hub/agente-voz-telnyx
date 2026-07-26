@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 
 from call_context import CallContextStore
-from panel_config_client import PanelObservationSettings, observe_panel_agent
+from panel_config_client import PanelObservationSettings, observe_panel_agent, select_system_prompt
 
 
 app = FastAPI()
@@ -34,7 +34,7 @@ TAREAS_CORTE = {}
 # Contextos efímeros de las llamadas activas. No usan base de datos ni polling.
 CALL_CONTEXTS = CallContextStore()
 
-# Configuración inmutable de observación. Nunca reemplaza valores de la llamada.
+# Configuración inmutable del panel. Cada llamada realiza una sola resolución.
 PANEL_OBSERVATION_SETTINGS = PanelObservationSettings.from_environment()
 
 
@@ -238,7 +238,7 @@ async def observar_y_guardar_contexto(
     call_control_id: str,
     called_number: str,
 ):
-    """Adjunta al contexto sólo los metadatos observados en Fase 1."""
+    """Adjunta al contexto la configuración dinámica de esta llamada."""
     observation = await observe_panel_agent(
         called_number,
         settings=PANEL_OBSERVATION_SETTINGS,
@@ -249,7 +249,29 @@ async def observar_y_guardar_contexto(
             observation,
         )
         if attached:
-            print("Configuración observada adjuntada al contexto.")
+            print("Configuración dinámica adjuntada al contexto.")
+
+
+async def recibir_inicio_telnyx(websocket: WebSocket):
+    """Espera el evento inicial para asociar el WebSocket con su llamada."""
+    while True:
+        texto = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+        mensaje = json.loads(texto)
+        evento = mensaje.get("event")
+        if evento == "connected":
+            print("Telnyx conectó el WebSocket.")
+            continue
+        if evento != "start":
+            continue
+        start_data = mensaje.get("start", {})
+        context = CALL_CONTEXTS.link_session(
+            call_control_id=start_data.get("call_control_id"),
+            call_session_id=start_data.get("call_session_id"),
+        )
+        if context is None:
+            raise RuntimeError("No se encontró el contexto de la llamada.")
+        print("Telnyx inició el stream de audio.")
+        return context
 
 
 # ---------------------------------------------------------
@@ -404,15 +426,6 @@ async def telnyx_webhook(
                     call_control_id
                 )
             )
-
-            # Observación paralela: no retrasa ni modifica la llamada.
-            if PANEL_OBSERVATION_SETTINGS.enabled:
-                asyncio.create_task(
-                    observar_y_guardar_contexto(
-                        call_control_id,
-                        called_number,
-                    )
-                )
 
         # La llamada terminó antes de los
         # cinco minutos o fue cortada por Telnyx.
@@ -784,6 +797,21 @@ async def websocket_audio_telnyx(
     )
 
     try:
+        call_context = await recibir_inicio_telnyx(websocket)
+        if PANEL_OBSERVATION_SETTINGS.enabled and call_context.agent_config is None:
+            await observar_y_guardar_contexto(
+                call_context.call_control_id,
+                call_context.to_number,
+            )
+            call_context = CALL_CONTEXTS.get(call_control_id=call_context.call_control_id) or call_context
+
+        system_prompt, prompt_source = select_system_prompt(
+            call_context.agent_config,
+            SYSTEM_PROMPT,
+            PANEL_OBSERVATION_SETTINGS,
+        )
+        print(f"Prompt de llamada preparado: source={prompt_source}.")
+
         _, gemini_api_key = (
             revisar_variables()
         )
@@ -797,7 +825,7 @@ async def websocket_audio_telnyx(
                 "AUDIO"
             ],
             "system_instruction": (
-                SYSTEM_PROMPT
+                system_prompt
             ),
             "speech_config": {
                 "voice_config": {
@@ -826,11 +854,10 @@ async def websocket_audio_telnyx(
             # El agente inicia hablando.
             await session.send_realtime_input(
                 text=(
-                    "Inicia la llamada ahora. "
-                    "Saluda brevemente, di que "
-                    "eres el asistente virtual "
-                    "de LealtadApps y pregunta "
-                    "con quién tienes el gusto."
+                    "Inicia la llamada ahora siguiendo exactamente la identidad, "
+                    "el saludo entrante y las reglas definidas en tus instrucciones. "
+                    "Si no existe un saludo específico, preséntate brevemente y "
+                    "pregunta cómo puedes ayudar."
                 )
             )
 

@@ -1,13 +1,10 @@
-"""Cliente de observación para la configuración del panel.
-
-Esta fase nunca aplica la configuración recibida a una llamada.
-"""
+"""Cliente de configuración dinámica del agente resuelto por el panel."""
 
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 
 import httpx
@@ -59,7 +56,21 @@ class PanelAgentObservation:
     agent_id: int
     client_id: int
     agent_name: str
+    system_prompt: str = field(repr=False)
     elapsed_ms: float
+
+
+def select_system_prompt(
+    agent_config: PanelAgentObservation | None,
+    fallback_prompt: str,
+    settings: PanelObservationSettings,
+) -> tuple[str, str]:
+    """Elige el prompt por llamada sin imprimir ni exponer su contenido."""
+    if agent_config is not None and agent_config.system_prompt.strip():
+        return agent_config.system_prompt, "panel"
+    if settings.enabled and not settings.fallback_enabled:
+        raise RuntimeError("No fue posible obtener la configuración del agente.")
+    return fallback_prompt, "respaldo"
 
 
 async def observe_panel_agent(
@@ -67,7 +78,7 @@ async def observe_panel_agent(
     settings: PanelObservationSettings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> PanelAgentObservation | None:
-    """Consulta una vez y conserva solo metadatos no sensibles para observación."""
+    """Consulta una vez la configuración del agente para una llamada entrante."""
     config = settings or PanelObservationSettings.from_environment()
     if not config.enabled:
         return None
@@ -113,11 +124,18 @@ async def observe_panel_agent(
         agent_id = agent["id"]
         client_id = agent["client_id"]
         agent_name = agent["name"]
-        if type(agent_id) is not int or type(client_id) is not int or not isinstance(agent_name, str):
+        system_prompt = agent["system_prompt"]
+        if (
+            type(agent_id) is not int
+            or type(client_id) is not int
+            or not isinstance(agent_name, str)
+            or not isinstance(system_prompt, str)
+        ):
             raise ValueError("invalid observation fields")
         safe_name = _safe_log_name(agent_name)
-        if not safe_name:
-            raise ValueError("empty agent name")
+        safe_prompt = system_prompt.strip()
+        if not safe_name or not (20 <= len(safe_prompt) <= 60000):
+            raise ValueError("invalid agent configuration")
     except (KeyError, TypeError, ValueError):
         logger.warning("Panel no observado: reason=invalid_response elapsed_ms=%.2f", elapsed_ms)
         return None
@@ -126,10 +144,11 @@ async def observe_panel_agent(
         agent_id=agent_id,
         client_id=client_id,
         agent_name=safe_name,
+        system_prompt=safe_prompt,
         elapsed_ms=elapsed_ms,
     )
     logger.info(
-        "Panel observado: agent_id=%s client_id=%s agent_name=%s elapsed_ms=%.2f",
+        "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",
         observation.agent_id,
         observation.client_id,
         observation.agent_name,

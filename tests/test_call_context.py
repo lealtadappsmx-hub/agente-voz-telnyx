@@ -7,6 +7,7 @@ def observation(agent_id: int, name: str) -> PanelAgentObservation:
         agent_id=agent_id,
         client_id=agent_id,
         agent_name=name,
+        system_prompt=f"Prompt dinámico completo para {name} y su empresa.",
         elapsed_ms=25.0,
     )
 
@@ -32,6 +33,7 @@ def test_two_calls_keep_independent_contexts():
 
     assert first.agent_config.agent_name == "Luisa"
     assert second.agent_config.agent_name == "Ana"
+    assert first.agent_config.system_prompt != second.agent_config.system_prompt
     assert first.timer_state == "active"
     assert second.timer_state == "pending"
     assert store.get(call_session_id="session-a") is first

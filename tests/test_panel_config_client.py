@@ -38,7 +38,7 @@ def test_disabled_mode_does_not_make_request():
     assert result is None
 
 
-def test_success_observes_only_safe_metadata(caplog):
+def test_success_returns_prompt_without_logging_it(caplog):
     captured = {}
 
     async def handler(request):
@@ -54,7 +54,7 @@ def test_success_observes_only_safe_metadata(caplog):
                     "id": 1,
                     "client_id": 1,
                     "name": "Luisa\n",
-                    "system_prompt": "PROMPT-MUY-SENSIBLE",
+                    "system_prompt": "PROMPT-MUY-SENSIBLE-Y-COMPLETO",
                     "voice_name": "Leda",
                 },
                 "credentials_status": {"gemini_configured": True, "telnyx_configured": True},
@@ -68,14 +68,16 @@ def test_success_observes_only_safe_metadata(caplog):
 
     assert result is not None
     assert (result.agent_id, result.client_id, result.agent_name) == (1, 1, "Luisa")
+    assert result.system_prompt == "PROMPT-MUY-SENSIBLE-Y-COMPLETO"
+    assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in repr(result)
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/voice/resolve-agent"
     assert captured["secret"] == TEST_SECRET
     assert b'"direction":"inbound"' in captured["body"]
-    assert "Panel observado: agent_id=1 client_id=1 agent_name=Luisa" in caplog.text
+    assert "Panel resuelto: agent_id=1 client_id=1 agent_name=Luisa prompt=ready" in caplog.text
     assert TEST_SECRET not in caplog.text
     assert TEST_PHONE not in caplog.text
-    assert "PROMPT-MUY-SENSIBLE" not in caplog.text
+    assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in caplog.text
     assert "Leda" not in caplog.text
 
 
@@ -116,6 +118,20 @@ def test_invalid_response_is_ignored():
     assert result is None
 
 
+def test_short_or_missing_prompt_is_rejected_without_exposure(caplog):
+    async def handler(_request):
+        return httpx.Response(
+            200,
+            json={"agent": {"id": 1, "client_id": 1, "name": "Luisa", "system_prompt": "corto"}},
+        )
+
+    result = asyncio.run(
+        observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
+    )
+    assert result is None
+    assert "corto" not in caplog.text
+
+
 def test_protected_audio_pipeline_remains_present():
     source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
     for protected_fragment in (
@@ -125,6 +141,8 @@ def test_protected_audio_pipeline_remains_present():
         "tamano_paquete = 160",
         '@app.websocket("/media")',
         "cliente_gemini.aio.live.connect",
+        '"system_instruction": (\n                system_prompt',
+        "recibir_inicio_telnyx",
         "cancelar_temporizador_llamada",
     ):
         assert protected_fragment in source
