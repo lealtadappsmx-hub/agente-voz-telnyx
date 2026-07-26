@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 
+from call_context import CallContextStore
 from panel_config_client import PanelObservationSettings, observe_panel_agent
 
 
@@ -29,6 +30,9 @@ MAX_CALL_SECONDS = 180
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
+
+# Contextos efímeros de las llamadas activas. No usan base de datos ni polling.
+CALL_CONTEXTS = CallContextStore()
 
 # Configuración inmutable de observación. Nunca reemplaza valores de la llamada.
 PANEL_OBSERVATION_SETTINGS = PanelObservationSettings.from_environment()
@@ -182,7 +186,16 @@ async def cortar_llamada_por_tiempo(
             call_control_id
         )
 
+        CALL_CONTEXTS.finish(
+            call_control_id,
+            "max_duration",
+        )
+
     except asyncio.CancelledError:
+        CALL_CONTEXTS.set_timer_state(
+            call_control_id,
+            "cancelled",
+        )
         print(
             "Temporizador cancelado porque "
             "la llamada terminó antes del límite."
@@ -219,6 +232,24 @@ def cancelar_temporizador_llamada(
 
     if tarea and not tarea.done():
         tarea.cancel()
+
+
+async def observar_y_guardar_contexto(
+    call_control_id: str,
+    called_number: str,
+):
+    """Adjunta al contexto sólo los metadatos observados en Fase 1."""
+    observation = await observe_panel_agent(
+        called_number,
+        settings=PANEL_OBSERVATION_SETTINGS,
+    )
+    if observation is not None:
+        attached = CALL_CONTEXTS.set_agent_config(
+            call_control_id,
+            observation,
+        )
+        if attached:
+            print("Configuración observada adjuntada al contexto.")
 
 
 # ---------------------------------------------------------
@@ -288,8 +319,16 @@ async def contestar_y_abrir_audio(
                 )
             )
         )
+        CALL_CONTEXTS.set_timer_state(
+            call_control_id,
+            "active",
+        )
 
     except Exception as error:
+        CALL_CONTEXTS.finish(
+            call_control_id,
+            "answer_failed",
+        )
         print(
             "ERROR contestando la llamada en Telnyx: "
             f"{type(error).__name__}"
@@ -346,6 +385,18 @@ async def telnyx_webhook(
 
             called_number = event_payload.get("to", "")
 
+            CALL_CONTEXTS.register(
+                call_control_id=call_control_id,
+                call_session_id=event_payload.get("call_session_id"),
+                from_number=event_payload.get("from"),
+                to_number=called_number,
+            )
+
+            print(
+                "Contexto de llamada creado. "
+                f"Contextos activos: {CALL_CONTEXTS.active_count}."
+            )
+
             print("Llamada entrante detectada.")
 
             asyncio.create_task(
@@ -357,9 +408,9 @@ async def telnyx_webhook(
             # Observación paralela: no retrasa ni modifica la llamada.
             if PANEL_OBSERVATION_SETTINGS.enabled:
                 asyncio.create_task(
-                    observe_panel_agent(
+                    observar_y_guardar_contexto(
+                        call_control_id,
                         called_number,
-                        settings=PANEL_OBSERVATION_SETTINGS,
                     )
                 )
 
@@ -376,7 +427,15 @@ async def telnyx_webhook(
                 call_control_id
             )
 
-            print("Llamada terminada. Temporizador eliminado.")
+            CALL_CONTEXTS.finish(
+                call_control_id,
+                event_payload.get("hangup_cause"),
+            )
+
+            print(
+                "Llamada terminada. Temporizador y contexto eliminados. "
+                f"Contextos activos: {CALL_CONTEXTS.active_count}."
+            )
 
         return JSONResponse(
             content={
@@ -435,6 +494,11 @@ async def enviar_audio_telnyx_a_gemini(
             )
 
         elif evento == "start":
+            start_data = mensaje.get("start", {})
+            CALL_CONTEXTS.link_session(
+                call_control_id=start_data.get("call_control_id"),
+                call_session_id=start_data.get("call_session_id"),
+            )
             print(
                 "Telnyx inició el stream "
                 "de audio."
