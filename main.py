@@ -18,8 +18,15 @@ app = FastAPI()
 # Dirección pública del WebSocket en EasyPanel
 TELNYX_WS_URL = "wss://vozagent.lealtadapps.com/media"
 
-# Modelo actual de Gemini Live
+# Modelo de Gemini Live que ya funciona en este proyecto
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
+
+# Duración máxima de cada llamada:
+# 300 segundos equivalen a 5 minutos.
+MAX_CALL_SECONDS = 300
+
+# Aquí se guardan los temporizadores activos.
+TAREAS_CORTE = {}
 
 
 # ---------------------------------------------------------
@@ -65,8 +72,15 @@ sus datos para que un desarrollador del equipo se comunique con ellos.
 # ---------------------------------------------------------
 
 def revisar_variables():
-    telnyx_api_key = os.getenv("TELNYX_API_KEY", "").strip()
-    gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    telnyx_api_key = os.getenv(
+        "TELNYX_API_KEY",
+        "",
+    ).strip()
+
+    gemini_api_key = os.getenv(
+        "GEMINI_API_KEY",
+        "",
+    ).strip()
 
     if not telnyx_api_key:
         raise RuntimeError(
@@ -82,24 +96,153 @@ def revisar_variables():
 
 
 # ---------------------------------------------------------
-# CONTESTAR LA LLAMADA Y ABRIR EL STREAM DE AUDIO
+# CONTROL DE DURACIÓN DE LAS LLAMADAS
 # ---------------------------------------------------------
 
-async def contestar_y_abrir_audio(call_control_id):
+async def colgar_llamada_telnyx(
+    call_control_id: str,
+):
     """
-    Contesta la llamada y ordena a Telnyx abrir un WebSocket
-    bidireccional hacia nuestro servidor.
+    Envía a Telnyx la orden para terminar
+    una llamada activa.
     """
 
     telnyx_api_key, _ = revisar_variables()
 
     url = (
-        f"https://api.telnyx.com/v2/calls/"
+        "https://api.telnyx.com/v2/calls/"
+        f"{call_control_id}/actions/hangup"
+    )
+
+    headers = {
+        "Authorization": (
+            f"Bearer {telnyx_api_key}"
+        ),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0
+        ) as client:
+
+            response = await client.post(
+                url,
+                headers=headers,
+                json={},
+            )
+
+        print(
+            "Respuesta de Telnyx al colgar: "
+            f"{response.status_code} - "
+            f"{response.text}"
+        )
+
+        response.raise_for_status()
+
+    except Exception as error:
+        print(
+            "ERROR al intentar colgar "
+            "la llamada: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+
+async def cortar_llamada_por_tiempo(
+    call_control_id: str,
+):
+    """
+    Espera cinco minutos y después termina
+    la llamada automáticamente.
+
+    Si la persona cuelga antes, este
+    temporizador se cancela.
+    """
+
+    try:
+        print(
+            "Temporizador iniciado para "
+            f"{call_control_id}: "
+            f"{MAX_CALL_SECONDS} segundos."
+        )
+
+        await asyncio.sleep(
+            MAX_CALL_SECONDS
+        )
+
+        print(
+            "La llamada alcanzó el límite de "
+            f"{MAX_CALL_SECONDS} segundos."
+        )
+
+        await colgar_llamada_telnyx(
+            call_control_id
+        )
+
+    except asyncio.CancelledError:
+        print(
+            "Temporizador cancelado porque "
+            "la llamada terminó antes del límite."
+        )
+
+    finally:
+        tarea_actual = asyncio.current_task()
+
+        if (
+            TAREAS_CORTE.get(call_control_id)
+            is tarea_actual
+        ):
+            TAREAS_CORTE.pop(
+                call_control_id,
+                None,
+            )
+
+
+def cancelar_temporizador_llamada(
+    call_control_id: str,
+):
+    """
+    Cancela y elimina el temporizador
+    correspondiente a una llamada.
+    """
+
+    if not call_control_id:
+        return
+
+    tarea = TAREAS_CORTE.pop(
+        call_control_id,
+        None,
+    )
+
+    if tarea and not tarea.done():
+        tarea.cancel()
+
+
+# ---------------------------------------------------------
+# CONTESTAR LA LLAMADA Y ABRIR EL STREAM DE AUDIO
+# ---------------------------------------------------------
+
+async def contestar_y_abrir_audio(
+    call_control_id: str,
+):
+    """
+    Contesta la llamada y ordena a Telnyx
+    abrir un WebSocket bidireccional.
+    """
+
+    telnyx_api_key, _ = revisar_variables()
+
+    url = (
+        "https://api.telnyx.com/v2/calls/"
         f"{call_control_id}/actions/answer"
     )
 
     headers = {
-        "Authorization": f"Bearer {telnyx_api_key}",
+        "Authorization": (
+            f"Bearer {telnyx_api_key}"
+        ),
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
@@ -114,7 +257,10 @@ async def contestar_y_abrir_audio(call_control_id):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0
+        ) as client:
+
             response = await client.post(
                 url,
                 headers=headers,
@@ -123,14 +269,31 @@ async def contestar_y_abrir_audio(call_control_id):
 
         print(
             "Respuesta de Telnyx al contestar: "
-            f"{response.status_code} - {response.text}"
+            f"{response.status_code} - "
+            f"{response.text}"
         )
 
         response.raise_for_status()
 
+        # Evitar temporizadores duplicados.
+        cancelar_temporizador_llamada(
+            call_control_id
+        )
+
+        # Crear el temporizador de cinco minutos.
+        TAREAS_CORTE[call_control_id] = (
+            asyncio.create_task(
+                cortar_llamada_por_tiempo(
+                    call_control_id
+                )
+            )
+        )
+
     except Exception as error:
         print(
-            "ERROR contestando la llamada en Telnyx: "
+            "ERROR contestando la llamada "
+            "en Telnyx: "
+            f"{type(error).__name__}: "
             f"{error}"
         )
 
@@ -140,7 +303,9 @@ async def contestar_y_abrir_audio(call_control_id):
 # ---------------------------------------------------------
 
 @app.post("/webhooks/telnyx")
-async def telnyx_webhook(request: Request):
+async def telnyx_webhook(
+    request: Request,
+):
     """
     Recibe los eventos enviados por Telnyx.
     """
@@ -148,24 +313,38 @@ async def telnyx_webhook(request: Request):
     try:
         payload = await request.json()
 
-        event_type = payload.get(
-            "data", {}
-        ).get(
+        data = payload.get(
+            "data",
+            {},
+        )
+
+        event_type = data.get(
             "event_type"
         )
 
-        print(
-            f"Evento recibido de Telnyx: {event_type}"
+        event_payload = data.get(
+            "payload",
+            {},
         )
 
+        print(
+            "Evento recibido de Telnyx: "
+            f"{event_type}"
+        )
+
+        # Nueva llamada entrante.
         if event_type == "call.initiated":
-            call_control_id = payload[
-                "data"
-            ][
-                "payload"
-            ][
-                "call_control_id"
-            ]
+            call_control_id = (
+                event_payload.get(
+                    "call_control_id"
+                )
+            )
+
+            if not call_control_id:
+                raise ValueError(
+                    "Telnyx no envió "
+                    "call_control_id."
+                )
 
             print(
                 "Llamada entrante detectada: "
@@ -178,14 +357,37 @@ async def telnyx_webhook(request: Request):
                 )
             )
 
+        # La llamada terminó antes de los
+        # cinco minutos o fue cortada por Telnyx.
+        elif event_type == "call.hangup":
+            call_control_id = (
+                event_payload.get(
+                    "call_control_id"
+                )
+            )
+
+            cancelar_temporizador_llamada(
+                call_control_id
+            )
+
+            print(
+                "Llamada terminada. "
+                "Temporizador eliminado: "
+                f"{call_control_id}"
+            )
+
         return JSONResponse(
-            content={"status": "ok"},
+            content={
+                "status": "ok"
+            },
             status_code=200,
         )
 
     except Exception as error:
         print(
-            "ERROR procesando el webhook de Telnyx: "
+            "ERROR procesando el webhook "
+            "de Telnyx: "
+            f"{type(error).__name__}: "
             f"{error}"
         )
 
@@ -203,22 +405,29 @@ async def telnyx_webhook(request: Request):
 # ---------------------------------------------------------
 
 async def enviar_audio_telnyx_a_gemini(
-    websocket,
+    websocket: WebSocket,
     session,
 ):
     """
-    Recibe audio PCMU de Telnyx, lo convierte a PCM
-    y lo envía a Gemini Live.
+    Recibe audio PCMU de Telnyx,
+    lo convierte a PCM y lo envía
+    a Gemini Live.
     """
 
     paquetes = 0
 
     while True:
-        texto = await websocket.receive_text()
+        texto = (
+            await websocket.receive_text()
+        )
 
-        mensaje = json.loads(texto)
+        mensaje = json.loads(
+            texto
+        )
 
-        evento = mensaje.get("event")
+        evento = mensaje.get(
+            "event"
+        )
 
         if evento == "connected":
             print(
@@ -227,7 +436,8 @@ async def enviar_audio_telnyx_a_gemini(
 
         elif evento == "start":
             print(
-                "Telnyx inició el stream de audio."
+                "Telnyx inició el stream "
+                "de audio."
             )
 
             print(
@@ -236,37 +446,49 @@ async def enviar_audio_telnyx_a_gemini(
             )
 
         elif evento == "media":
-            audio_base64 = mensaje.get(
-                "media", {}
-            ).get(
-                "payload"
+            audio_base64 = (
+                mensaje.get(
+                    "media",
+                    {},
+                ).get(
+                    "payload"
+                )
             )
 
             if not audio_base64:
                 continue
 
-            # Audio PCMU recibido desde Telnyx
-            audio_pcmu = base64.b64decode(
-                audio_base64
+            # Audio PCMU recibido desde Telnyx.
+            audio_pcmu = (
+                base64.b64decode(
+                    audio_base64
+                )
             )
 
-            # Convertir PCMU a PCM de 16 bits
-            audio_pcm_8khz = audioop.ulaw2lin(
-                audio_pcmu,
-                2,
+            # Convertir PCMU a PCM de 16 bits.
+            audio_pcm_8khz = (
+                audioop.ulaw2lin(
+                    audio_pcmu,
+                    2,
+                )
             )
 
-            # Enviar audio a Gemini Live
+            # Enviar audio a Gemini Live.
             await session.send_realtime_input(
                 audio=types.Blob(
                     data=audio_pcm_8khz,
-                    mime_type="audio/pcm;rate=8000",
+                    mime_type=(
+                        "audio/pcm;rate=8000"
+                    ),
                 )
             )
 
             paquetes += 1
 
-            if paquetes == 1 or paquetes % 100 == 0:
+            if (
+                paquetes == 1
+                or paquetes % 100 == 0
+            ):
                 print(
                     "Audio enviado a Gemini: "
                     f"{paquetes} paquetes"
@@ -274,13 +496,17 @@ async def enviar_audio_telnyx_a_gemini(
 
         elif evento == "stop":
             print(
-                "Telnyx detuvo el stream de audio."
+                "Telnyx detuvo el stream "
+                "de audio."
             )
 
             try:
-                await session.send_realtime_input(
-                    audio_stream_end=True
+                await (
+                    session.send_realtime_input(
+                        audio_stream_end=True
+                    )
                 )
+
             except Exception:
                 pass
 
@@ -293,10 +519,13 @@ async def enviar_audio_telnyx_a_gemini(
             )
 
         elif evento == "dtmf":
-            tecla = mensaje.get(
-                "dtmf", {}
-            ).get(
-                "digit"
+            tecla = (
+                mensaje.get(
+                    "dtmf",
+                    {},
+                ).get(
+                    "digit"
+                )
             )
 
             print(
@@ -309,12 +538,13 @@ async def enviar_audio_telnyx_a_gemini(
 # ---------------------------------------------------------
 
 async def enviar_audio_gemini_a_telnyx(
-    websocket,
+    websocket: WebSocket,
     session,
 ):
     """
-    Recibe continuamente el audio PCM de Gemini,
-    lo convierte a PCMU y lo reproduce en Telnyx.
+    Recibe continuamente el audio PCM
+    de Gemini, lo convierte a PCMU y
+    lo reproduce en Telnyx.
     """
 
     estado_resampleo = None
@@ -324,14 +554,21 @@ async def enviar_audio_gemini_a_telnyx(
     # de audio PCMU a 8 kHz.
     tamano_paquete = 160
 
+    # Este ciclo permite múltiples turnos
+    # de conversación.
     while True:
-        async for respuesta in session.receive():
-            contenido = respuesta.server_content
+        async for respuesta in (
+            session.receive()
+        ):
+            contenido = (
+                respuesta.server_content
+            )
 
             if not contenido:
                 continue
 
-            # Permite que la persona interrumpa al agente.
+            # Permitir que la persona
+            # interrumpa al agente.
             if contenido.interrupted:
                 buffer_pcmu.clear()
                 estado_resampleo = None
@@ -343,8 +580,9 @@ async def enviar_audio_gemini_a_telnyx(
                 )
 
                 print(
-                    "La persona interrumpió al agente. "
-                    "Audio pendiente cancelado."
+                    "La persona interrumpió "
+                    "al agente. Audio pendiente "
+                    "cancelado."
                 )
 
             turno = contenido.model_turn
@@ -353,16 +591,20 @@ async def enviar_audio_gemini_a_telnyx(
                 for parte in turno.parts:
                     datos = parte.inline_data
 
-                    if not datos:
+                    if (
+                        not datos
+                        or not datos.data
+                    ):
                         continue
 
-                    if not datos.data:
-                        continue
+                    # Gemini entrega audio PCM
+                    # a 24 kHz.
+                    audio_pcm_24khz = (
+                        datos.data
+                    )
 
-                    # Gemini entrega audio PCM a 24 kHz.
-                    audio_pcm_24khz = datos.data
-
-                    # Convertir el audio de 24 kHz a 8 kHz.
+                    # Convertir de 24 kHz
+                    # a 8 kHz.
                     (
                         audio_pcm_8khz,
                         estado_resampleo,
@@ -375,22 +617,31 @@ async def enviar_audio_gemini_a_telnyx(
                         estado_resampleo,
                     )
 
-                    # Convertir PCM a PCMU para Telnyx.
-                    audio_pcmu = audioop.lin2ulaw(
-                        audio_pcm_8khz,
-                        2,
+                    # Convertir PCM a PCMU.
+                    audio_pcmu = (
+                        audioop.lin2ulaw(
+                            audio_pcm_8khz,
+                            2,
+                        )
                     )
 
                     buffer_pcmu.extend(
                         audio_pcmu
                     )
 
-                    while len(buffer_pcmu) >= tamano_paquete:
+                    while (
+                        len(buffer_pcmu)
+                        >= tamano_paquete
+                    ):
                         paquete = bytes(
-                            buffer_pcmu[:tamano_paquete]
+                            buffer_pcmu[
+                                :tamano_paquete
+                            ]
                         )
 
-                        del buffer_pcmu[:tamano_paquete]
+                        del buffer_pcmu[
+                            :tamano_paquete
+                        ]
 
                         paquete_base64 = (
                             base64.b64encode(
@@ -400,18 +651,25 @@ async def enviar_audio_gemini_a_telnyx(
                             )
                         )
 
-                        await websocket.send_json(
-                            {
-                                "event": "media",
-                                "media": {
-                                    "payload": paquete_base64
-                                },
-                            }
+                        await (
+                            websocket.send_json(
+                                {
+                                    "event": "media",
+                                    "media": {
+                                        "payload": (
+                                            paquete_base64
+                                        )
+                                    },
+                                }
+                            )
                         )
 
-            # Enviar cualquier audio restante
-            # cuando Gemini termine de hablar.
-            if contenido.turn_complete and buffer_pcmu:
+            # Mandar el audio que quede
+            # cuando Gemini termine el turno.
+            if (
+                contenido.turn_complete
+                and buffer_pcmu
+            ):
                 faltan = (
                     tamano_paquete
                     - len(buffer_pcmu)
@@ -434,7 +692,9 @@ async def enviar_audio_gemini_a_telnyx(
                     {
                         "event": "media",
                         "media": {
-                            "payload": paquete_base64
+                            "payload": (
+                                paquete_base64
+                            )
                         },
                     }
                 )
@@ -443,19 +703,22 @@ async def enviar_audio_gemini_a_telnyx(
 
                 print(
                     "Gemini terminó un turno. "
-                    "Esperando la siguiente respuesta."
+                    "Esperando la siguiente "
+                    "respuesta."
                 )
+
+
 # ---------------------------------------------------------
 # WEBSOCKET: PUENTE TELNYX ↔ GEMINI
 # ---------------------------------------------------------
 
 @app.websocket("/media")
 async def websocket_audio_telnyx(
-    websocket: WebSocket
+    websocket: WebSocket,
 ):
     """
-    Conecta el audio de Telnyx con Gemini Live
-    en ambas direcciones.
+    Conecta el audio de Telnyx con
+    Gemini Live en ambas direcciones.
     """
 
     await websocket.accept()
@@ -465,7 +728,9 @@ async def websocket_audio_telnyx(
     )
 
     try:
-        _, gemini_api_key = revisar_variables()
+        _, gemini_api_key = (
+            revisar_variables()
+        )
 
         cliente_gemini = genai.Client(
             api_key=gemini_api_key
@@ -498,30 +763,36 @@ async def websocket_audio_telnyx(
         ) as session:
 
             print(
-                "Sesión de Gemini Live conectada."
+                "Sesión de Gemini Live "
+                "conectada."
             )
 
-            # Indica a Gemini que debe hablar primero.
+            # El agente inicia hablando.
             await session.send_realtime_input(
                 text=(
                     "Inicia la llamada ahora. "
-                    "Saluda brevemente, di que eres "
-                    "el asistente virtual de LealtadApps "
-                    "y pregunta con quién tienes el gusto."
+                    "Saluda brevemente, di que "
+                    "eres el asistente virtual "
+                    "de LealtadApps y pregunta "
+                    "con quién tienes el gusto."
                 )
             )
 
-            tarea_entrada = asyncio.create_task(
-                enviar_audio_telnyx_a_gemini(
-                    websocket,
-                    session,
+            tarea_entrada = (
+                asyncio.create_task(
+                    enviar_audio_telnyx_a_gemini(
+                        websocket,
+                        session,
+                    )
                 )
             )
 
-            tarea_salida = asyncio.create_task(
-                enviar_audio_gemini_a_telnyx(
-                    websocket,
-                    session,
+            tarea_salida = (
+                asyncio.create_task(
+                    enviar_audio_gemini_a_telnyx(
+                        websocket,
+                        session,
+                    )
                 )
             )
 
@@ -559,13 +830,16 @@ async def websocket_audio_telnyx(
 
     except Exception as error:
         print(
-            "ERROR en el puente Telnyx-Gemini: "
-            f"{type(error).__name__}: {error}"
+            "ERROR en el puente "
+            "Telnyx-Gemini: "
+            f"{type(error).__name__}: "
+            f"{error}"
         )
 
     finally:
         try:
             await websocket.close()
+
         except Exception:
             pass
 
@@ -583,6 +857,9 @@ async def root():
         ),
         "websocket": "/media",
         "model": GEMINI_MODEL,
+        "max_call_seconds": (
+            MAX_CALL_SECONDS
+        ),
     }
 
 
