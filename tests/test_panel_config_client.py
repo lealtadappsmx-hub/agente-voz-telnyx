@@ -61,7 +61,7 @@ def test_success_observes_only_safe_metadata(caplog):
             },
         )
 
-    caplog.set_level(logging.INFO, logger="voice.panel_observation")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     result = asyncio.run(
         observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
     )
@@ -83,7 +83,7 @@ def test_http_error_is_controlled_without_sensitive_logs(caplog):
     async def handler(_request):
         return httpx.Response(401, json={"error": {"message": TEST_SECRET}})
 
-    caplog.set_level(logging.INFO, logger="voice.panel_observation")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     result = asyncio.run(
         observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
     )
@@ -97,7 +97,7 @@ def test_network_failure_is_fallback_only(caplog):
     async def handler(request):
         raise httpx.ConnectTimeout("simulated timeout", request=request)
 
-    caplog.set_level(logging.INFO, logger="voice.panel_observation")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     result = asyncio.run(
         observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
     )

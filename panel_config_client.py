@@ -13,7 +13,8 @@ from time import perf_counter
 import httpx
 
 
-logger = logging.getLogger("voice.panel_observation")
+# Uvicorn ya configura este logger en INFO dentro del contenedor.
+logger = logging.getLogger("uvicorn.error")
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
