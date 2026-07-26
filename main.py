@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 
+from panel_config_client import PanelObservationSettings, observe_panel_agent
+
 
 app = FastAPI()
 
@@ -27,6 +29,9 @@ MAX_CALL_SECONDS = 180
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
+
+# Configuración inmutable de observación. Nunca reemplaza valores de la llamada.
+PANEL_OBSERVATION_SETTINGS = PanelObservationSettings.from_environment()
 
 
 # ---------------------------------------------------------
@@ -135,18 +140,15 @@ async def colgar_llamada_telnyx(
 
         print(
             "Respuesta de Telnyx al colgar: "
-            f"{response.status_code} - "
-            f"{response.text}"
+            f"HTTP {response.status_code}."
         )
 
         response.raise_for_status()
 
     except Exception as error:
         print(
-            "ERROR al intentar colgar "
-            "la llamada: "
-            f"{type(error).__name__}: "
-            f"{error}"
+            "ERROR al intentar colgar la llamada: "
+            f"{type(error).__name__}"
         )
 
 
@@ -163,8 +165,7 @@ async def cortar_llamada_por_tiempo(
 
     try:
         print(
-            "Temporizador iniciado para "
-            f"{call_control_id}: "
+            "Temporizador de llamada iniciado: "
             f"{MAX_CALL_SECONDS} segundos."
         )
 
@@ -269,8 +270,7 @@ async def contestar_y_abrir_audio(
 
         print(
             "Respuesta de Telnyx al contestar: "
-            f"{response.status_code} - "
-            f"{response.text}"
+            f"HTTP {response.status_code}."
         )
 
         response.raise_for_status()
@@ -291,10 +291,8 @@ async def contestar_y_abrir_audio(
 
     except Exception as error:
         print(
-            "ERROR contestando la llamada "
-            "en Telnyx: "
-            f"{type(error).__name__}: "
-            f"{error}"
+            "ERROR contestando la llamada en Telnyx: "
+            f"{type(error).__name__}"
         )
 
 
@@ -346,16 +344,24 @@ async def telnyx_webhook(
                     "call_control_id."
                 )
 
-            print(
-                "Llamada entrante detectada: "
-                f"{call_control_id}"
-            )
+            called_number = event_payload.get("to", "")
+
+            print("Llamada entrante detectada.")
 
             asyncio.create_task(
                 contestar_y_abrir_audio(
                     call_control_id
                 )
             )
+
+            # Observación paralela: no retrasa ni modifica la llamada.
+            if PANEL_OBSERVATION_SETTINGS.enabled:
+                asyncio.create_task(
+                    observe_panel_agent(
+                        called_number,
+                        settings=PANEL_OBSERVATION_SETTINGS,
+                    )
+                )
 
         # La llamada terminó antes de los
         # cinco minutos o fue cortada por Telnyx.
@@ -370,11 +376,7 @@ async def telnyx_webhook(
                 call_control_id
             )
 
-            print(
-                "Llamada terminada. "
-                "Temporizador eliminado: "
-                f"{call_control_id}"
-            )
+            print("Llamada terminada. Temporizador eliminado.")
 
         return JSONResponse(
             content={
@@ -385,10 +387,8 @@ async def telnyx_webhook(
 
     except Exception as error:
         print(
-            "ERROR procesando el webhook "
-            "de Telnyx: "
-            f"{type(error).__name__}: "
-            f"{error}"
+            "ERROR procesando el webhook de Telnyx: "
+            f"{type(error).__name__}"
         )
 
         return JSONResponse(
@@ -438,11 +438,6 @@ async def enviar_audio_telnyx_a_gemini(
             print(
                 "Telnyx inició el stream "
                 "de audio."
-            )
-
-            print(
-                "Datos de inicio: "
-                f"{mensaje.get('start', {})}"
             )
 
         elif evento == "media":
@@ -513,10 +508,7 @@ async def enviar_audio_telnyx_a_gemini(
             return
 
         elif evento == "error":
-            print(
-                "ERROR enviado por Telnyx: "
-                f"{mensaje}"
-            )
+            print("ERROR enviado por Telnyx durante el stream.")
 
         elif evento == "dtmf":
             tecla = (
@@ -830,10 +822,8 @@ async def websocket_audio_telnyx(
 
     except Exception as error:
         print(
-            "ERROR en el puente "
-            "Telnyx-Gemini: "
-            f"{type(error).__name__}: "
-            f"{error}"
+            "ERROR en el puente Telnyx-Gemini: "
+            f"{type(error).__name__}"
         )
 
     finally:
