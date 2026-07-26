@@ -23,7 +23,7 @@ GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 # Duración máxima de cada llamada:
 # 300 segundos equivalen a 5 minutos.
-MAX_CALL_SECONDS = 300
+MAX_CALL_SECONDS = 30
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
