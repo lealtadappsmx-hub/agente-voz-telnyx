@@ -22,8 +22,8 @@ TELNYX_WS_URL = "wss://vozagent.lealtadapps.com/media"
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 # Duración máxima de cada llamada:
-# 300 segundos equivalen a 5 minutos.
-MAX_CALL_SECONDS = 30
+# 180 segundos equivalen a 3 minutos.
+MAX_CALL_SECONDS = 180
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
