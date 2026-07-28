@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 
 from call_context import CallContextStore
+from call_duration import closing_deadlines
 from panel_config_client import (
     CallDurationSettings,
     PanelObservationSettings,
@@ -39,7 +40,6 @@ MAX_CALL_SECONDS = 180
 # Margen acotado para no interrumpir una frase de cierre ya enviada a Gemini.
 # No hay polling: cada espera ocurre una vez por etapa de cierre.
 CLOSING_AUDIO_TIMEOUT_SECONDS = 12
-CLOSING_AUDIO_GRACE_SECONDS = 8
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
@@ -219,8 +219,12 @@ async def cortar_llamada_por_tiempo(
 
     maximum = duration_settings.max_call_seconds
     farewell_before_end = duration_settings.farewell_seconds_before_end
-    closing_start = answered_at + maximum - farewell_before_end
-    hard_limit = answered_at + maximum
+    warning_start, hard_limit = closing_deadlines(
+        answered_at=answered_at,
+        max_call_seconds=maximum,
+        farewell_seconds_before_end=farewell_before_end,
+        has_time_warning=bool(duration_settings.time_warning_message),
+    )
 
     try:
         print(
@@ -228,37 +232,29 @@ async def cortar_llamada_por_tiempo(
             f"max_seconds={maximum} farewell_before_end={farewell_before_end}."
         )
 
-        await asyncio.sleep(_seconds_until(closing_start))
-
-        warning_queued = await _send_closing_message(
-            call_control_id,
-            "time_warning",
-            duration_settings.time_warning_message,
-        )
-
-        if warning_queued:
-            warning_window = max(
-                CLOSING_AUDIO_TIMEOUT_SECONDS,
-                farewell_before_end,
-            )
-            warning_finished = await _wait_for_closing_turn(
+        # El aviso, si existe, se pronuncia antes del límite. Nunca se usa
+        # ese margen para adelantar la despedida final: así "90 segundos"
+        # realmente significa que el cierre final comienza en el segundo 90.
+        if warning_start is not None:
+            await asyncio.sleep(_seconds_until(warning_start))
+            warning_queued = await _send_closing_message(
                 call_control_id,
-                warning_window,
+                "time_warning",
+                duration_settings.time_warning_message,
             )
-            if not warning_finished:
-                print("Cierre de llamada sin confirmación de audio: phase=time_warning.")
+            if warning_queued:
+                warning_window = min(
+                    CLOSING_AUDIO_TIMEOUT_SECONDS,
+                    _seconds_until(hard_limit),
+                )
                 warning_finished = await _wait_for_closing_turn(
                     call_control_id,
-                    CLOSING_AUDIO_GRACE_SECONDS,
+                    warning_window,
                 )
-            if not warning_finished:
-                print("Cierre de llamada agotó el margen de audio: phase=time_warning.")
+                if not warning_finished:
+                    print("Cierre de llamada sin confirmación de audio: phase=time_warning.")
 
-        # Si hubo aviso, la despedida se reserva para el límite real. Si no
-        # hubo aviso, ``farewell_seconds_before_end`` ya reservó este margen
-        # para pronunciar directamente la despedida.
-        if warning_queued:
-            await asyncio.sleep(_seconds_until(hard_limit))
+        await asyncio.sleep(_seconds_until(hard_limit))
 
         farewell_queued = await _send_closing_message(
             call_control_id,
@@ -273,6 +269,8 @@ async def cortar_llamada_por_tiempo(
             )
             if not farewell_finished:
                 print("Cierre de llamada sin confirmación de audio: phase=final_farewell.")
+            else:
+                print("Audio de despedida confirmado: phase=final_farewell.")
 
         print(
             "La llamada alcanzó su límite configurado. "

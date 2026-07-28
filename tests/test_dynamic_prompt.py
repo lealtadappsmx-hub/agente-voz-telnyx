@@ -1,5 +1,6 @@
 import pytest
 
+from call_duration import closing_deadlines
 from panel_config_client import (
     PanelAgentObservation,
     PanelObservationSettings,
@@ -107,3 +108,16 @@ def test_call_duration_keeps_fixed_safe_fallback_for_invalid_or_missing_panel_va
     assert selected.farewell_seconds_before_end == 0
     assert selected.time_warning_message is None
     assert selected.final_farewell is None
+
+
+def test_final_farewell_starts_at_the_configured_limit_when_there_is_no_warning():
+    """El margen previo no debe adelantar una despedida final por sí solo."""
+    warning_start, final_farewell_start = closing_deadlines(
+        answered_at=0,
+        max_call_seconds=90,
+        farewell_seconds_before_end=20,
+        has_time_warning=False,
+    )
+
+    assert warning_start is None
+    assert final_farewell_start == 90
