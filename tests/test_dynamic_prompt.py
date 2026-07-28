@@ -3,6 +3,7 @@ import pytest
 from panel_config_client import (
     PanelAgentObservation,
     PanelObservationSettings,
+    select_call_duration_settings,
     select_live_session_settings,
     select_system_prompt,
 )
@@ -63,3 +64,46 @@ def test_live_voice_and_thinking_are_taken_from_the_resolved_agent():
 
 def test_live_voice_and_thinking_keep_safe_defaults_without_panel_data():
     assert select_live_session_settings(None) == ("Kore", "minimal")
+
+
+def test_call_duration_uses_valid_controls_from_the_resolved_agent():
+    observation = PanelAgentObservation(
+        agent_id=1,
+        client_id=1,
+        agent_name="Luisa",
+        system_prompt="Prompt dinámico completo de Luisa para la llamada real.",
+        elapsed_ms=20.0,
+        max_call_seconds=300,
+        farewell_seconds_before_end=20,
+        time_warning_message="Quedan pocos segundos para cerrar la llamada.",
+        final_farewell="Gracias por llamar. Hasta luego.",
+    )
+
+    selected = select_call_duration_settings(observation)
+
+    assert selected.max_call_seconds == 300
+    assert selected.farewell_seconds_before_end == 20
+    assert selected.time_warning_message == "Quedan pocos segundos para cerrar la llamada."
+    assert selected.final_farewell == "Gracias por llamar. Hasta luego."
+
+
+def test_call_duration_keeps_fixed_safe_fallback_for_invalid_or_missing_panel_values():
+    assert select_call_duration_settings(None).max_call_seconds == 180
+
+    invalid = PanelAgentObservation(
+        agent_id=1,
+        client_id=1,
+        agent_name="Luisa",
+        system_prompt="Prompt dinámico completo de Luisa para la llamada real.",
+        elapsed_ms=20.0,
+        max_call_seconds=10,
+        farewell_seconds_before_end=20,
+        time_warning_message="No debe aplicarse.",
+        final_farewell="No debe aplicarse.",
+    )
+
+    selected = select_call_duration_settings(invalid)
+    assert selected.max_call_seconds == 180
+    assert selected.farewell_seconds_before_end == 0
+    assert selected.time_warning_message is None
+    assert selected.final_farewell is None

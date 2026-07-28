@@ -3,6 +3,7 @@ import json
 import base64
 import asyncio
 import audioop
+from time import monotonic
 
 import httpx
 import uvicorn
@@ -13,8 +14,10 @@ from google.genai import types
 
 from call_context import CallContextStore
 from panel_config_client import (
+    CallDurationSettings,
     PanelObservationSettings,
     observe_panel_agent,
+    select_call_duration_settings,
     select_live_session_settings,
     select_system_prompt,
 )
@@ -32,6 +35,11 @@ GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 # Duración máxima de cada llamada:
 # 180 segundos equivalen a 3 minutos.
 MAX_CALL_SECONDS = 180
+
+# Margen acotado para no interrumpir una frase de cierre ya enviada a Gemini.
+# No hay polling: cada espera ocurre una vez por etapa de cierre.
+CLOSING_AUDIO_TIMEOUT_SECONDS = 12
+CLOSING_AUDIO_GRACE_SECONDS = 8
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
@@ -161,40 +169,117 @@ async def colgar_llamada_telnyx(
         )
 
 
+def _seconds_until(deadline: float) -> float:
+    """Calcula una espera única; nunca devuelve un valor negativo."""
+    return max(0.0, deadline - monotonic())
+
+
+async def _wait_for_closing_turn(
+    call_control_id: str,
+    timeout_seconds: float,
+) -> bool:
+    """Espera una sola vez el fin del turno de Gemini de una fase de cierre."""
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context is None:
+        return False
+    try:
+        await asyncio.wait_for(
+            context.closure_turn_finished.wait(),
+            timeout=max(0.1, timeout_seconds),
+        )
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def _send_closing_message(
+    call_control_id: str,
+    phase: str,
+    message: str | None,
+) -> bool:
+    """Encola una frase validada para Gemini sin registrarla en los logs."""
+    if not message:
+        return False
+    queued = CALL_CONTEXTS.request_closure_message(
+        call_control_id,
+        phase,
+        message,
+    )
+    if queued:
+        print(f"Cierre de llamada solicitado: phase={phase}.")
+    return queued
+
+
 async def cortar_llamada_por_tiempo(
     call_control_id: str,
+    duration_settings: CallDurationSettings,
+    answered_at: float,
 ):
-    """
-    Espera cinco minutos y después termina
-    la llamada automáticamente.
+    """Aplica el cierre configurado, con corte fijo seguro como respaldo."""
 
-    Si la persona cuelga antes, este
-    temporizador se cancela.
-    """
+    maximum = duration_settings.max_call_seconds
+    farewell_before_end = duration_settings.farewell_seconds_before_end
+    closing_start = answered_at + maximum - farewell_before_end
+    hard_limit = answered_at + maximum
 
     try:
         print(
-            "Temporizador de llamada iniciado: "
-            f"{MAX_CALL_SECONDS} segundos."
+            "Temporizador de llamada preparado: "
+            f"max_seconds={maximum} farewell_before_end={farewell_before_end}."
         )
 
-        await asyncio.sleep(
-            MAX_CALL_SECONDS
+        await asyncio.sleep(_seconds_until(closing_start))
+
+        warning_queued = await _send_closing_message(
+            call_control_id,
+            "time_warning",
+            duration_settings.time_warning_message,
         )
+
+        if warning_queued:
+            warning_window = max(
+                CLOSING_AUDIO_TIMEOUT_SECONDS,
+                farewell_before_end,
+            )
+            warning_finished = await _wait_for_closing_turn(
+                call_control_id,
+                warning_window,
+            )
+            if not warning_finished:
+                print("Cierre de llamada sin confirmación de audio: phase=time_warning.")
+                warning_finished = await _wait_for_closing_turn(
+                    call_control_id,
+                    CLOSING_AUDIO_GRACE_SECONDS,
+                )
+            if not warning_finished:
+                print("Cierre de llamada agotó el margen de audio: phase=time_warning.")
+
+        # Si hubo aviso, la despedida se reserva para el límite real. Si no
+        # hubo aviso, ``farewell_seconds_before_end`` ya reservó este margen
+        # para pronunciar directamente la despedida.
+        if warning_queued:
+            await asyncio.sleep(_seconds_until(hard_limit))
+
+        farewell_queued = await _send_closing_message(
+            call_control_id,
+            "final_farewell",
+            duration_settings.final_farewell,
+        )
+
+        if farewell_queued:
+            farewell_finished = await _wait_for_closing_turn(
+                call_control_id,
+                CLOSING_AUDIO_TIMEOUT_SECONDS,
+            )
+            if not farewell_finished:
+                print("Cierre de llamada sin confirmación de audio: phase=final_farewell.")
 
         print(
-            "La llamada alcanzó el límite de "
-            f"{MAX_CALL_SECONDS} segundos."
+            "La llamada alcanzó su límite configurado. "
+            "Solicitando corte físico a Telnyx."
         )
-
-        await colgar_llamada_telnyx(
-            call_control_id
-        )
-
-        CALL_CONTEXTS.finish(
-            call_control_id,
-            "max_duration",
-        )
+        await colgar_llamada_telnyx(call_control_id)
+        CALL_CONTEXTS.finish(call_control_id, "max_duration")
 
     except asyncio.CancelledError:
         CALL_CONTEXTS.set_timer_state(
@@ -239,6 +324,27 @@ def cancelar_temporizador_llamada(
         tarea.cancel()
 
 
+def iniciar_temporizador_llamada(
+    call_control_id: str,
+    duration_settings: CallDurationSettings,
+):
+    """Mantiene un solo temporizador por llamada y conserva el tiempo ya transcurrido."""
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context is None or context.answered_at_monotonic is None:
+        return False
+
+    cancelar_temporizador_llamada(call_control_id)
+    TAREAS_CORTE[call_control_id] = asyncio.create_task(
+        cortar_llamada_por_tiempo(
+            call_control_id,
+            duration_settings,
+            context.answered_at_monotonic,
+        )
+    )
+    CALL_CONTEXTS.set_timer_state(call_control_id, "active")
+    return True
+
+
 async def observar_y_guardar_contexto(
     call_control_id: str,
     called_number: str,
@@ -255,6 +361,14 @@ async def observar_y_guardar_contexto(
         )
         if attached:
             print("Configuración dinámica adjuntada al contexto.")
+            duration_settings = select_call_duration_settings(observation)
+            if iniciar_temporizador_llamada(call_control_id, duration_settings):
+                print(
+                    "Configuración de duración preparada: "
+                    f"max_seconds={duration_settings.max_call_seconds} "
+                    f"warning={'enabled' if duration_settings.time_warning_message else 'disabled'} "
+                    f"farewell={'enabled' if duration_settings.final_farewell else 'disabled'}."
+                )
 
 
 async def recibir_inicio_telnyx(websocket: WebSocket):
@@ -333,23 +447,13 @@ async def contestar_y_abrir_audio(
 
         response.raise_for_status()
 
-        # Evitar temporizadores duplicados.
-        cancelar_temporizador_llamada(
-            call_control_id
-        )
-
-        # Crear el temporizador de cinco minutos.
-        TAREAS_CORTE[call_control_id] = (
-            asyncio.create_task(
-                cortar_llamada_por_tiempo(
-                    call_control_id
-                )
+        # El respaldo se inicia inmediatamente. Cuando el panel resuelva la
+        # llamada, se sustituye conservando el tiempo ya transcurrido.
+        if CALL_CONTEXTS.mark_answered(call_control_id):
+            iniciar_temporizador_llamada(
+                call_control_id,
+                CallDurationSettings(),
             )
-        )
-        CALL_CONTEXTS.set_timer_state(
-            call_control_id,
-            "active",
-        )
 
     except Exception as error:
         CALL_CONTEXTS.finish(
@@ -484,6 +588,7 @@ async def telnyx_webhook(
 async def enviar_audio_telnyx_a_gemini(
     websocket: WebSocket,
     session,
+    call_control_id: str,
 ):
     """
     Recibe audio PCMU de Telnyx,
@@ -523,6 +628,11 @@ async def enviar_audio_telnyx_a_gemini(
             )
 
         elif evento == "media":
+            # Durante el aviso o la despedida el audio de la persona no abre
+            # otro turno: se prioriza terminar la frase de cierre sin cortes.
+            if CALL_CONTEXTS.is_closing(call_control_id):
+                continue
+
             audio_base64 = (
                 mensaje.get(
                     "media",
@@ -611,9 +721,32 @@ async def enviar_audio_telnyx_a_gemini(
 # ENVIAR AUDIO DE GEMINI HACIA TELNYX
 # ---------------------------------------------------------
 
+async def enviar_instrucciones_de_cierre_a_gemini(
+    session,
+    call_control_id: str,
+):
+    """Entrega a Gemini sólo mensajes de cierre autorizados por el panel."""
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context is None:
+        return
+
+    while True:
+        phase, message = await context.closure_queue.get()
+        await session.send_realtime_input(
+            text=(
+                "Cierra la llamada ahora. Pronuncia exactamente el mensaje "
+                "autorizado a continuación, sin agregar explicaciones, "
+                "preguntas ni datos nuevos; después termina tu turno. "
+                f"Mensaje autorizado: {message}"
+            )
+        )
+        print(f"Instrucción de cierre enviada a Gemini: phase={phase}.")
+
+
 async def enviar_audio_gemini_a_telnyx(
     websocket: WebSocket,
     session,
+    call_control_id: str,
 ):
     """
     Recibe continuamente el audio PCM
@@ -740,46 +873,40 @@ async def enviar_audio_gemini_a_telnyx(
 
             # Mandar el audio que quede
             # cuando Gemini termine el turno.
-            if (
-                contenido.turn_complete
-                and buffer_pcmu
-            ):
-                faltan = (
-                    tamano_paquete
-                    - len(buffer_pcmu)
-                )
+            if contenido.turn_complete:
+                if buffer_pcmu:
+                    faltan = tamano_paquete - len(buffer_pcmu)
 
-                if faltan > 0:
-                    buffer_pcmu.extend(
-                        b"\xff" * faltan
-                    )
+                    if faltan > 0:
+                        buffer_pcmu.extend(b"\xff" * faltan)
 
-                paquete_base64 = (
-                    base64.b64encode(
+                    paquete_base64 = base64.b64encode(
                         bytes(buffer_pcmu)
-                    ).decode(
-                        "ascii"
+                    ).decode("ascii")
+
+                    await websocket.send_json(
+                        {
+                            "event": "media",
+                            "media": {
+                                "payload": paquete_base64,
+                            },
+                        }
                     )
-                )
+                    buffer_pcmu.clear()
 
-                await websocket.send_json(
-                    {
-                        "event": "media",
-                        "media": {
-                            "payload": (
-                                paquete_base64
-                            )
-                        },
-                    }
+                closing_phase = CALL_CONTEXTS.complete_closure_turn(
+                    call_control_id
                 )
-
-                buffer_pcmu.clear()
-
-                print(
-                    "Gemini terminó un turno. "
-                    "Esperando la siguiente "
-                    "respuesta."
-                )
+                if closing_phase:
+                    print(
+                        "Audio de cierre preparado finalizó: "
+                        f"phase={closing_phase}."
+                    )
+                else:
+                    print(
+                        "Gemini terminó un turno. "
+                        "Esperando la siguiente respuesta."
+                    )
 
 
 # ---------------------------------------------------------
@@ -801,8 +928,11 @@ async def websocket_audio_telnyx(
         "TELNYX ABRIÓ EL WEBSOCKET /media"
     )
 
+    call_control_id = None
+
     try:
         call_context = await recibir_inicio_telnyx(websocket)
+        call_control_id = call_context.call_control_id
         if PANEL_OBSERVATION_SETTINGS.enabled and call_context.agent_config is None:
             await observar_y_guardar_contexto(
                 call_context.call_control_id,
@@ -860,6 +990,7 @@ async def websocket_audio_telnyx(
                 "Sesión de Gemini Live "
                 "conectada."
             )
+            CALL_CONTEXTS.mark_runtime_ready(call_control_id, True)
 
             # El agente inicia hablando.
             await session.send_realtime_input(
@@ -876,6 +1007,7 @@ async def websocket_audio_telnyx(
                     enviar_audio_telnyx_a_gemini(
                         websocket,
                         session,
+                        call_control_id,
                     )
                 )
             )
@@ -885,7 +1017,15 @@ async def websocket_audio_telnyx(
                     enviar_audio_gemini_a_telnyx(
                         websocket,
                         session,
+                        call_control_id,
                     )
+                )
+            )
+
+            tarea_cierre = asyncio.create_task(
+                enviar_instrucciones_de_cierre_a_gemini(
+                    session,
+                    call_control_id,
                 )
             )
 
@@ -894,6 +1034,7 @@ async def websocket_audio_telnyx(
                     {
                         tarea_entrada,
                         tarea_salida,
+                        tarea_cierre,
                     },
                     return_when=(
                         asyncio.FIRST_COMPLETED
@@ -928,6 +1069,8 @@ async def websocket_audio_telnyx(
         )
 
     finally:
+        if call_control_id:
+            CALL_CONTEXTS.mark_runtime_ready(call_control_id, False)
         try:
             await websocket.close()
 

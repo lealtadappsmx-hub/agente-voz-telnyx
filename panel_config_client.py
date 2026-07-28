@@ -18,6 +18,8 @@ logger = logging.getLogger("uvicorn.error")
 # esta lista explícita evita enviar nombres arbitrarios desde el panel a la API.
 DEFAULT_VOICE_NAME = "Kore"
 DEFAULT_THINKING_LEVEL = "minimal"
+DEFAULT_MAX_CALL_SECONDS = 180
+MAX_TEXT_CONTROL_LENGTH = 500
 SUPPORTED_VOICE_NAMES = frozenset(
     {
         "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
@@ -62,6 +64,13 @@ def _selected_thinking_level(value: object) -> str:
     return candidate if candidate in SUPPORTED_THINKING_LEVELS else DEFAULT_THINKING_LEVEL
 
 
+def _selected_control_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned[:MAX_TEXT_CONTROL_LENGTH] or None
+
+
 @dataclass(frozen=True)
 class PanelObservationSettings:
     enabled: bool
@@ -90,6 +99,20 @@ class PanelAgentObservation:
     elapsed_ms: float
     voice_name: str = DEFAULT_VOICE_NAME
     thinking_level: str = DEFAULT_THINKING_LEVEL
+    max_call_seconds: int = DEFAULT_MAX_CALL_SECONDS
+    farewell_seconds_before_end: int = 0
+    time_warning_message: str | None = field(default=None, repr=False)
+    final_farewell: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class CallDurationSettings:
+    """Controles físicos de duración validados para una sola llamada."""
+
+    max_call_seconds: int = DEFAULT_MAX_CALL_SECONDS
+    farewell_seconds_before_end: int = 0
+    time_warning_message: str | None = field(default=None, repr=False)
+    final_farewell: str | None = field(default=None, repr=False)
 
 
 def select_system_prompt(
@@ -114,6 +137,27 @@ def select_live_session_settings(
     return (
         _selected_voice_name(agent_config.voice_name),
         _selected_thinking_level(agent_config.thinking_level),
+    )
+
+
+def select_call_duration_settings(
+    agent_config: PanelAgentObservation | None,
+) -> CallDurationSettings:
+    """Selecciona duración del panel sin alterar el corte fijo de respaldo."""
+    if agent_config is None:
+        return CallDurationSettings()
+
+    maximum = agent_config.max_call_seconds
+    farewell_seconds = agent_config.farewell_seconds_before_end
+    if type(maximum) is not int or not 30 <= maximum <= 1800:
+        return CallDurationSettings()
+    if type(farewell_seconds) is not int or not 0 <= farewell_seconds < maximum:
+        return CallDurationSettings(max_call_seconds=maximum)
+    return CallDurationSettings(
+        max_call_seconds=maximum,
+        farewell_seconds_before_end=farewell_seconds,
+        time_warning_message=_selected_control_text(agent_config.time_warning_message),
+        final_farewell=_selected_control_text(agent_config.final_farewell),
     )
 
 
@@ -171,6 +215,13 @@ async def observe_panel_agent(
         system_prompt = agent["system_prompt"]
         voice_name = agent.get("voice_name")
         thinking_level = agent.get("thinking_level")
+        conversation = payload.get("conversation")
+        if not isinstance(conversation, dict):
+            conversation = {}
+        max_call_seconds = conversation.get("max_call_seconds")
+        farewell_seconds_before_end = conversation.get("farewell_seconds_before_end")
+        time_warning_message = conversation.get("time_warning_message")
+        final_farewell = conversation.get("final_farewell")
         if (
             type(agent_id) is not int
             or type(client_id) is not int
@@ -194,6 +245,10 @@ async def observe_panel_agent(
         elapsed_ms=elapsed_ms,
         voice_name=_selected_voice_name(voice_name),
         thinking_level=_selected_thinking_level(thinking_level),
+        max_call_seconds=max_call_seconds,
+        farewell_seconds_before_end=farewell_seconds_before_end,
+        time_warning_message=_selected_control_text(time_warning_message),
+        final_farewell=_selected_control_text(final_farewell),
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",

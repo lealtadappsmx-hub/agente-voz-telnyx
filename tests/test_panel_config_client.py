@@ -59,6 +59,12 @@ def test_success_returns_prompt_without_logging_it(caplog):
                     "thinking_level": "low",
                 },
                 "credentials_status": {"gemini_configured": True, "telnyx_configured": True},
+                "conversation": {
+                    "max_call_seconds": 300,
+                    "farewell_seconds_before_end": 20,
+                    "time_warning_message": "Aviso privado de tiempo.",
+                    "final_farewell": "Despedida privada.",
+                },
             },
         )
 
@@ -72,6 +78,10 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert result.system_prompt == "PROMPT-MUY-SENSIBLE-Y-COMPLETO"
     assert result.voice_name == "Leda"
     assert result.thinking_level == "low"
+    assert result.max_call_seconds == 300
+    assert result.farewell_seconds_before_end == 20
+    assert result.time_warning_message == "Aviso privado de tiempo."
+    assert result.final_farewell == "Despedida privada."
     assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in repr(result)
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/voice/resolve-agent"
@@ -171,5 +181,8 @@ def test_protected_audio_pipeline_remains_present():
         '"system_instruction": (\n                system_prompt',
         "recibir_inicio_telnyx",
         "cancelar_temporizador_llamada",
+        "select_call_duration_settings",
+        "request_closure_message",
+        "closure_turn_finished",
     ):
         assert protected_fragment in source

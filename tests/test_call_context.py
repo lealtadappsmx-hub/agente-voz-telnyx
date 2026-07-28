@@ -97,3 +97,22 @@ def test_late_observation_is_ignored_after_cleanup():
 
     assert store.set_agent_config("control-a", observation(1, "Luisa")) is False
     assert store.active_count == 0
+
+
+def test_context_queues_one_closing_message_only_when_runtime_is_ready():
+    store = CallContextStore()
+    context = store.register(
+        call_control_id="control-a",
+        call_session_id="session-a",
+        from_number="caller-a",
+        to_number="called-a",
+    )
+
+    assert store.request_closure_message("control-a", "time_warning", "Mensaje") is False
+    assert store.mark_runtime_ready("control-a", True) is True
+    assert store.request_closure_message("control-a", "time_warning", "Mensaje") is True
+    assert context.closure_queue.get_nowait() == ("time_warning", "Mensaje")
+    assert context.closure_turn_finished.is_set() is False
+    assert store.complete_closure_turn("control-a") == "time_warning"
+    assert context.closure_turn_finished.is_set() is True
+    assert store.is_closing("control-a") is False

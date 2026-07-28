@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
+from time import monotonic
 
 from panel_config_client import PanelAgentObservation
 
@@ -16,6 +18,11 @@ class CallContext:
     agent_config: PanelAgentObservation | None = None
     timer_state: str = "pending"
     hangup_reason: str | None = None
+    answered_at_monotonic: float | None = None
+    runtime_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    closure_turn_finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    closure_queue: asyncio.Queue[tuple[str, str]] = field(default_factory=asyncio.Queue, repr=False)
+    closure_phase: str | None = None
 
 
 class CallContextStore:
@@ -112,6 +119,45 @@ class CallContextStore:
             return False
         context.timer_state = state
         return True
+
+    def mark_answered(self, call_control_id: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None:
+            return False
+        context.answered_at_monotonic = monotonic()
+        return True
+
+    def mark_runtime_ready(self, call_control_id: str, ready: bool) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None:
+            return False
+        if ready:
+            context.runtime_ready.set()
+        else:
+            context.runtime_ready.clear()
+        return True
+
+    def request_closure_message(self, call_control_id: str, phase: str, message: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None or not context.runtime_ready.is_set() or not message:
+            return False
+        context.closure_phase = phase
+        context.closure_turn_finished.clear()
+        context.closure_queue.put_nowait((phase, message))
+        return True
+
+    def complete_closure_turn(self, call_control_id: str) -> str | None:
+        context = self.get(call_control_id=call_control_id)
+        if context is None or context.closure_phase is None:
+            return None
+        phase = context.closure_phase
+        context.closure_phase = None
+        context.closure_turn_finished.set()
+        return phase
+
+    def is_closing(self, call_control_id: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        return bool(context and context.closure_phase)
 
     def finish(
         self,
