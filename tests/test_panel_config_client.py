@@ -56,6 +56,7 @@ def test_success_returns_prompt_without_logging_it(caplog):
                     "name": "Luisa\n",
                     "system_prompt": "PROMPT-MUY-SENSIBLE-Y-COMPLETO",
                     "voice_name": "Leda",
+                    "thinking_level": "low",
                 },
                 "credentials_status": {"gemini_configured": True, "telnyx_configured": True},
             },
@@ -69,6 +70,8 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert result is not None
     assert (result.agent_id, result.client_id, result.agent_name) == (1, 1, "Luisa")
     assert result.system_prompt == "PROMPT-MUY-SENSIBLE-Y-COMPLETO"
+    assert result.voice_name == "Leda"
+    assert result.thinking_level == "low"
     assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in repr(result)
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/voice/resolve-agent"
@@ -130,6 +133,30 @@ def test_short_or_missing_prompt_is_rejected_without_exposure(caplog):
     )
     assert result is None
     assert "corto" not in caplog.text
+
+
+def test_invalid_live_values_use_safe_defaults_without_rejecting_the_prompt():
+    async def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "agent": {
+                    "id": 1,
+                    "client_id": 1,
+                    "name": "Luisa",
+                    "system_prompt": "Prompt válido suficientemente largo para conservar la llamada activa.",
+                    "voice_name": "voz-no-autorizada",
+                    "thinking_level": "máximo",
+                }
+            },
+        )
+
+    result = asyncio.run(
+        observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
+    )
+    assert result is not None
+    assert result.voice_name == "Kore"
+    assert result.thinking_level == "minimal"
 
 
 def test_protected_audio_pipeline_remains_present():

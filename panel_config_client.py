@@ -14,6 +14,23 @@ import httpx
 logger = logging.getLogger("uvicorn.error")
 
 
+# Gemini 3.1 Flash Live admite las voces predefinidas de Gemini TTS. Mantener
+# esta lista explícita evita enviar nombres arbitrarios desde el panel a la API.
+DEFAULT_VOICE_NAME = "Kore"
+DEFAULT_THINKING_LEVEL = "minimal"
+SUPPORTED_VOICE_NAMES = frozenset(
+    {
+        "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+        "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+        "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+        "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+        "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+    }
+)
+SUPPORTED_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+_VOICE_BY_CASEFOLD = {voice.casefold(): voice for voice in SUPPORTED_VOICE_NAMES}
+
+
 def _as_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -30,6 +47,19 @@ def _timeout_seconds(value: str | None) -> float:
 
 def _safe_log_name(value: str) -> str:
     return " ".join(value.split())[:120]
+
+
+def _selected_voice_name(value: object) -> str:
+    if not isinstance(value, str):
+        return DEFAULT_VOICE_NAME
+    return _VOICE_BY_CASEFOLD.get(value.strip().casefold(), DEFAULT_VOICE_NAME)
+
+
+def _selected_thinking_level(value: object) -> str:
+    if not isinstance(value, str):
+        return DEFAULT_THINKING_LEVEL
+    candidate = value.strip().lower()
+    return candidate if candidate in SUPPORTED_THINKING_LEVELS else DEFAULT_THINKING_LEVEL
 
 
 @dataclass(frozen=True)
@@ -58,6 +88,8 @@ class PanelAgentObservation:
     agent_name: str
     system_prompt: str = field(repr=False)
     elapsed_ms: float
+    voice_name: str = DEFAULT_VOICE_NAME
+    thinking_level: str = DEFAULT_THINKING_LEVEL
 
 
 def select_system_prompt(
@@ -71,6 +103,18 @@ def select_system_prompt(
     if settings.enabled and not settings.fallback_enabled:
         raise RuntimeError("No fue posible obtener la configuración del agente.")
     return fallback_prompt, "respaldo"
+
+
+def select_live_session_settings(
+    agent_config: PanelAgentObservation | None,
+) -> tuple[str, str]:
+    """Devuelve únicamente valores compatibles con Gemini Live para esta llamada."""
+    if agent_config is None:
+        return DEFAULT_VOICE_NAME, DEFAULT_THINKING_LEVEL
+    return (
+        _selected_voice_name(agent_config.voice_name),
+        _selected_thinking_level(agent_config.thinking_level),
+    )
 
 
 async def observe_panel_agent(
@@ -125,6 +169,8 @@ async def observe_panel_agent(
         client_id = agent["client_id"]
         agent_name = agent["name"]
         system_prompt = agent["system_prompt"]
+        voice_name = agent.get("voice_name")
+        thinking_level = agent.get("thinking_level")
         if (
             type(agent_id) is not int
             or type(client_id) is not int
@@ -146,6 +192,8 @@ async def observe_panel_agent(
         agent_name=safe_name,
         system_prompt=safe_prompt,
         elapsed_ms=elapsed_ms,
+        voice_name=_selected_voice_name(voice_name),
+        thinking_level=_selected_thinking_level(thinking_level),
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",

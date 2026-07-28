@@ -12,7 +12,12 @@ from google import genai
 from google.genai import types
 
 from call_context import CallContextStore
-from panel_config_client import PanelObservationSettings, observe_panel_agent, select_system_prompt
+from panel_config_client import (
+    PanelObservationSettings,
+    observe_panel_agent,
+    select_live_session_settings,
+    select_system_prompt,
+)
 
 
 app = FastAPI()
@@ -810,7 +815,12 @@ async def websocket_audio_telnyx(
             SYSTEM_PROMPT,
             PANEL_OBSERVATION_SETTINGS,
         )
+        voice_name, thinking_level = select_live_session_settings(call_context.agent_config)
         print(f"Prompt de llamada preparado: source={prompt_source}.")
+        print(
+            "Configuración de Gemini Live preparada: "
+            f"voice={voice_name} thinking={thinking_level}."
+        )
 
         _, gemini_api_key = (
             revisar_variables()
@@ -830,12 +840,12 @@ async def websocket_audio_telnyx(
             "speech_config": {
                 "voice_config": {
                     "prebuilt_voice_config": {
-                        "voice_name": "Kore"
+                        "voice_name": voice_name
                     }
                 }
             },
             "thinking_config": {
-                "thinking_level": "minimal"
+                "thinking_level": thinking_level
             },
         }
 
