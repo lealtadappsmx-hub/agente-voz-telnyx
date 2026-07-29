@@ -69,6 +69,13 @@ def test_success_returns_prompt_without_logging_it(caplog):
                     "time_warning_message": "Aviso privado de tiempo.",
                     "final_farewell": "Despedida privada.",
                 },
+                "end_call": {
+                    "no_interest": {
+                        "enabled": True,
+                        "recovery_attempts": 2,
+                        "final_message": "Despedida privada.",
+                    }
+                },
             },
         )
 
@@ -88,6 +95,7 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert result.final_farewell == "Despedida privada."
     assert result.gemini_credential_envelope == "encrypted-gemini-envelope-for-test"
     assert result.telnyx_credential_envelope == "encrypted-telnyx-envelope-for-test"
+    assert result.end_call["no_interest"]["recovery_attempts"] == 2
     assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in repr(result)
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/voice/resolve-agent"

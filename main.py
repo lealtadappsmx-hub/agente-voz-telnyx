@@ -13,6 +13,14 @@ from google.genai import types
 
 from call_context import CallContextStore
 from call_duration import closing_deadlines
+from end_call import (
+    END_CALL_ACTION,
+    EndCallSettings,
+    end_call_runtime_instruction,
+    end_call_tool_declaration,
+    select_end_call_settings,
+    validate_end_call_request,
+)
 from gemini_key_selector import select_gemini_api_key
 from panel_config_client import (
     CallDurationSettings,
@@ -285,6 +293,58 @@ async def cortar_llamada_por_tiempo(
                 call_control_id,
                 None,
             )
+
+
+async def cortar_llamada_por_end_call(
+    call_control_id: str,
+    reason: str,
+):
+    """Espera una vez el audio final autorizado y ordena el hangup físico."""
+    try:
+        finished = await _wait_for_closing_turn(
+            call_control_id,
+            CLOSING_AUDIO_TIMEOUT_SECONDS,
+        )
+        if finished:
+            print(f"Audio de cierre preparado finalizó: reason={reason}.")
+        else:
+            print(f"Cierre de llamada sin confirmación de audio: reason={reason}.")
+
+        print(f"END_CALL aceptado. Solicitando corte físico a Telnyx: reason={reason}.")
+        await colgar_llamada_telnyx(call_control_id)
+        CALL_CONTEXTS.finish(call_control_id, reason)
+    except asyncio.CancelledError:
+        print("Cierre END_CALL cancelado porque la llamada terminó antes.")
+    finally:
+        tarea_actual = asyncio.current_task()
+        if TAREAS_CORTE.get(call_control_id) is tarea_actual:
+            TAREAS_CORTE.pop(call_control_id, None)
+
+
+def iniciar_cierre_por_end_call(
+    call_control_id: str,
+    reason: str,
+    settings: EndCallSettings,
+) -> bool:
+    """Programa un único cierre físico para el motivo autorizado de esta llamada."""
+    message = settings.message_for_reason(reason)
+    if not message:
+        return False
+
+    queued = CALL_CONTEXTS.request_closure_message(
+        call_control_id,
+        "end_call",
+        message,
+    )
+    if not queued:
+        return False
+
+    cancelar_temporizador_llamada(call_control_id)
+    TAREAS_CORTE[call_control_id] = asyncio.create_task(
+        cortar_llamada_por_end_call(call_control_id, reason)
+    )
+    print(f"END_CALL preparado: reason={reason}.")
+    return True
 
 
 def cancelar_temporizador_llamada(
@@ -758,10 +818,42 @@ async def enviar_instrucciones_de_cierre_a_gemini(
         print(f"Instrucción de cierre enviada a Gemini: phase={phase}.")
 
 
+async def procesar_end_call_de_gemini(
+    session,
+    call_control_id: str,
+    settings: EndCallSettings,
+    tool_call,
+):
+    """Valida la única herramienta de cierre y confirma el resultado a Gemini."""
+    function_responses = []
+    for function_call in tool_call.function_calls or []:
+        reason = validate_end_call_request(
+            function_call.name,
+            function_call.args,
+            settings,
+        )
+        accepted = bool(reason and iniciar_cierre_por_end_call(call_control_id, reason, settings))
+        if accepted:
+            result = {"action": END_CALL_ACTION, "status": "accepted"}
+        else:
+            result = {"action": END_CALL_ACTION, "status": "rejected"}
+        function_responses.append(
+            types.FunctionResponse(
+                id=function_call.id,
+                name=function_call.name,
+                response=result,
+            )
+        )
+
+    if function_responses:
+        await session.send_tool_response(function_responses=function_responses)
+
+
 async def enviar_audio_gemini_a_telnyx(
     websocket: WebSocket,
     session,
     call_control_id: str,
+    end_call_settings: EndCallSettings,
 ):
     """
     Recibe continuamente el audio PCM
@@ -782,9 +874,16 @@ async def enviar_audio_gemini_a_telnyx(
         async for respuesta in (
             session.receive()
         ):
-            contenido = (
-                respuesta.server_content
-            )
+            tool_call = getattr(respuesta, "tool_call", None)
+            if tool_call:
+                await procesar_end_call_de_gemini(
+                    session,
+                    call_control_id,
+                    end_call_settings,
+                    tool_call,
+                )
+
+            contenido = getattr(respuesta, "server_content", None)
 
             if not contenido:
                 continue
@@ -956,6 +1055,7 @@ async def websocket_audio_telnyx(
             SYSTEM_PROMPT,
             PANEL_OBSERVATION_SETTINGS,
         )
+        end_call_settings = select_end_call_settings(call_context.agent_config.end_call)
         voice_name, thinking_level = select_live_session_settings(call_context.agent_config)
         print(f"Prompt de llamada preparado: source={prompt_source}.")
         print(
@@ -978,7 +1078,7 @@ async def websocket_audio_telnyx(
                 "AUDIO"
             ],
             "system_instruction": (
-                system_prompt
+                system_prompt + end_call_runtime_instruction(end_call_settings)
             ),
             "speech_config": {
                 "voice_config": {
@@ -991,6 +1091,9 @@ async def websocket_audio_telnyx(
                 "thinking_level": thinking_level
             },
         }
+        end_call_tool = end_call_tool_declaration(end_call_settings)
+        if end_call_tool:
+            configuracion["tools"] = [{"function_declarations": [end_call_tool]}]
 
         async with (
             cliente_gemini.aio.live.connect(
@@ -1039,6 +1142,7 @@ async def websocket_audio_telnyx(
                 enviar_instrucciones_de_cierre_a_gemini(
                     session,
                     call_control_id,
+                    end_call_settings,
                 )
             )
 

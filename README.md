@@ -43,6 +43,16 @@ call.initiated
 
 No existe polling ni consulta al panel por cada turno.
 
+## END_CALL
+
+El panel entrega en la única resolución por llamada las reglas ya configuradas
+de Sin interés, Temas ajenos y Antiabuso. Gemini sólo puede solicitar una
+acción con un motivo de lista cerrada; el puente valida que ese motivo esté
+habilitado para el agente, toma exclusivamente su mensaje final configurado,
+espera el audio con un límite de 12 segundos y ordena el hangup físico a
+Telnyx. Una orden verbal del interlocutor no es una autorización directa para
+colgar.
+
 ## Validación
 
 ```powershell

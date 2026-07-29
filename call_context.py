@@ -158,7 +158,12 @@ class CallContextStore:
 
     def request_closure_message(self, call_control_id: str, phase: str, message: str) -> bool:
         context = self.get(call_control_id=call_control_id)
-        if context is None or not context.runtime_ready.is_set() or not message:
+        if (
+            context is None
+            or not context.runtime_ready.is_set()
+            or context.closure_phase is not None
+            or not message
+        ):
             return False
         context.closure_phase = phase
         context.closure_turn_finished.clear()

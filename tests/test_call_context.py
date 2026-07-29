@@ -118,6 +118,20 @@ def test_context_queues_one_closing_message_only_when_runtime_is_ready():
     assert store.is_closing("control-a") is False
 
 
+def test_context_rejects_a_second_closure_while_the_first_is_pending():
+    store = CallContextStore()
+    store.register(
+        call_control_id="control-a",
+        call_session_id="session-a",
+        from_number="caller-a",
+        to_number="called-a",
+    )
+    store.mark_runtime_ready("control-a", True)
+
+    assert store.request_closure_message("control-a", "end_call", "Primer mensaje") is True
+    assert store.request_closure_message("control-a", "end_call", "Segundo mensaje") is False
+
+
 def test_telnyx_credential_is_ephemeral_and_cleared_when_call_finishes():
     store = CallContextStore()
     context = store.register(

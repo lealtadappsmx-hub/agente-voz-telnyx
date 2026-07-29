@@ -105,6 +105,7 @@ class PanelAgentObservation:
     final_farewell: str | None = field(default=None, repr=False)
     gemini_credential_envelope: str | None = field(default=None, repr=False)
     telnyx_credential_envelope: str | None = field(default=None, repr=False)
+    end_call: dict[str, object] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,9 @@ async def observe_panel_agent(
         farewell_seconds_before_end = conversation.get("farewell_seconds_before_end")
         time_warning_message = conversation.get("time_warning_message")
         final_farewell = conversation.get("final_farewell")
+        end_call = payload.get("end_call")
+        if not isinstance(end_call, dict):
+            end_call = {}
         runtime = payload.get("runtime")
         if not isinstance(runtime, dict):
             runtime = {}
@@ -266,6 +270,7 @@ async def observe_panel_agent(
         final_farewell=_selected_control_text(final_farewell),
         gemini_credential_envelope=gemini_credential_envelope,
         telnyx_credential_envelope=telnyx_credential_envelope,
+        end_call=end_call,
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",
