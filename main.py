@@ -1,4 +1,3 @@
-import os
 import json
 import base64
 import asyncio
@@ -23,6 +22,7 @@ from panel_config_client import (
     select_live_session_settings,
     select_system_prompt,
 )
+from telnyx_key_selector import select_telnyx_api_key
 
 
 app = FastAPI()
@@ -90,22 +90,12 @@ sus datos para que un desarrollador del equipo se comunique con ellos.
 """
 
 
-# ---------------------------------------------------------
-# COMPROBAR LAS VARIABLES DE EASYPANEL
-# ---------------------------------------------------------
-
-def revisar_variables() -> str:
-    telnyx_api_key = os.getenv(
-        "TELNYX_API_KEY",
-        "",
-    ).strip()
-
-    if not telnyx_api_key:
-        raise RuntimeError(
-            "Falta la variable TELNYX_API_KEY en EasyPanel."
-        )
-
-    return telnyx_api_key
+def _telnyx_api_key_for_call(call_control_id: str) -> str:
+    """Obtiene únicamente la clave efímera del negocio resuelto."""
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context is None or not context.telnyx_api_key:
+        raise RuntimeError("La llamada no tiene credencial Telnyx preparada.")
+    return context.telnyx_api_key
 
 
 # ---------------------------------------------------------
@@ -120,7 +110,11 @@ async def colgar_llamada_telnyx(
     una llamada activa.
     """
 
-    telnyx_api_key = revisar_variables()
+    try:
+        telnyx_api_key = _telnyx_api_key_for_call(call_control_id)
+    except RuntimeError:
+        print("ERROR al intentar colgar la llamada: credencial Telnyx no disponible.")
+        return
 
     url = (
         "https://api.telnyx.com/v2/calls/"
@@ -338,26 +332,33 @@ async def observar_y_guardar_contexto(
     call_control_id: str,
     called_number: str,
 ):
-    """Adjunta al contexto la configuración dinámica de esta llamada."""
+    """Resuelve una vez el agente y adjunta sus credenciales efímeras."""
     observation = await observe_panel_agent(
         called_number,
         settings=PANEL_OBSERVATION_SETTINGS,
     )
-    if observation is not None:
-        attached = CALL_CONTEXTS.set_agent_config(
-            call_control_id,
+    if observation is None:
+        CALL_CONTEXTS.mark_configuration_ready(call_control_id, False)
+        return None
+
+    try:
+        telnyx_api_key = select_telnyx_api_key(
             observation,
+            shared_secret=PANEL_OBSERVATION_SETTINGS.shared_secret,
         )
-        if attached:
-            print("Configuración dinámica adjuntada al contexto.")
-            duration_settings = select_call_duration_settings(observation)
-            if iniciar_temporizador_llamada(call_control_id, duration_settings):
-                print(
-                    "Configuración de duración preparada: "
-                    f"max_seconds={duration_settings.max_call_seconds} "
-                    f"warning={'enabled' if duration_settings.time_warning_message else 'disabled'} "
-                    f"farewell={'enabled' if duration_settings.final_farewell else 'disabled'}."
-                )
+    except RuntimeError:
+        CALL_CONTEXTS.mark_configuration_ready(call_control_id, False)
+        return None
+
+    attached = CALL_CONTEXTS.set_agent_config(call_control_id, observation)
+    key_attached = CALL_CONTEXTS.set_telnyx_api_key(call_control_id, telnyx_api_key)
+    if not attached or not key_attached:
+        CALL_CONTEXTS.mark_configuration_ready(call_control_id, False)
+        return None
+
+    CALL_CONTEXTS.mark_configuration_ready(call_control_id, True)
+    print("Configuración dinámica y credencial Telnyx adjuntadas al contexto.")
+    return observation
 
 
 async def recibir_inicio_telnyx(websocket: WebSocket):
@@ -394,7 +395,7 @@ async def contestar_y_abrir_audio(
     abrir un WebSocket bidireccional.
     """
 
-    telnyx_api_key = revisar_variables()
+    telnyx_api_key = _telnyx_api_key_for_call(call_control_id)
 
     url = (
         "https://api.telnyx.com/v2/calls/"
@@ -436,12 +437,20 @@ async def contestar_y_abrir_audio(
 
         response.raise_for_status()
 
-        # El respaldo se inicia inmediatamente. Cuando el panel resuelva la
-        # llamada, se sustituye conservando el tiempo ya transcurrido.
         if CALL_CONTEXTS.mark_answered(call_control_id):
+            context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+            duration_settings = select_call_duration_settings(
+                context.agent_config if context else None
+            )
             iniciar_temporizador_llamada(
                 call_control_id,
-                CallDurationSettings(),
+                duration_settings,
+            )
+            print(
+                "Configuración de duración preparada: "
+                f"max_seconds={duration_settings.max_call_seconds} "
+                f"warning={'enabled' if duration_settings.time_warning_message else 'disabled'} "
+                f"farewell={'enabled' if duration_settings.final_farewell else 'disabled'}."
             )
 
     except Exception as error:
@@ -453,6 +462,22 @@ async def contestar_y_abrir_audio(
             "ERROR contestando la llamada en Telnyx: "
             f"{type(error).__name__}"
         )
+
+
+async def preparar_y_contestar_llamada(
+    call_control_id: str,
+    called_number: str,
+):
+    """Resuelve el negocio antes de contestar; no usa credenciales globales."""
+    observation = await observar_y_guardar_contexto(
+        call_control_id,
+        called_number,
+    )
+    if observation is None:
+        CALL_CONTEXTS.finish(call_control_id, "configuration_unavailable")
+        print("Llamada no contestada: configuración del negocio no disponible.")
+        return
+    await contestar_y_abrir_audio(call_control_id)
 
 
 # ---------------------------------------------------------
@@ -520,8 +545,9 @@ async def telnyx_webhook(
             print("Llamada entrante detectada.")
 
             asyncio.create_task(
-                contestar_y_abrir_audio(
-                    call_control_id
+                preparar_y_contestar_llamada(
+                    call_control_id,
+                    called_number,
                 )
             )
 
@@ -922,12 +948,8 @@ async def websocket_audio_telnyx(
     try:
         call_context = await recibir_inicio_telnyx(websocket)
         call_control_id = call_context.call_control_id
-        if PANEL_OBSERVATION_SETTINGS.enabled and call_context.agent_config is None:
-            await observar_y_guardar_contexto(
-                call_context.call_control_id,
-                call_context.to_number,
-            )
-            call_context = CALL_CONTEXTS.get(call_control_id=call_context.call_control_id) or call_context
+        if call_context.configuration_failed or call_context.agent_config is None:
+            raise RuntimeError("La configuración del negocio no está disponible.")
 
         system_prompt, prompt_source = select_system_prompt(
             call_context.agent_config,

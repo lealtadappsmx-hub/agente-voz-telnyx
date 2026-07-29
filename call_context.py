@@ -16,6 +16,9 @@ class CallContext:
     from_number: str | None
     to_number: str
     agent_config: PanelAgentObservation | None = None
+    telnyx_api_key: str | None = field(default=None, repr=False)
+    configuration_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    configuration_failed: bool = False
     timer_state: str = "pending"
     hangup_reason: str | None = None
     answered_at_monotonic: float | None = None
@@ -113,6 +116,22 @@ class CallContextStore:
         context.agent_config = agent_config
         return True
 
+    def set_telnyx_api_key(self, call_control_id: str, api_key: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        cleaned_key = api_key.strip() if isinstance(api_key, str) else ""
+        if context is None or not cleaned_key:
+            return False
+        context.telnyx_api_key = cleaned_key
+        return True
+
+    def mark_configuration_ready(self, call_control_id: str, ready: bool) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None:
+            return False
+        context.configuration_failed = not ready
+        context.configuration_ready.set()
+        return True
+
     def set_timer_state(self, call_control_id: str, state: str) -> bool:
         context = self.get(call_control_id=call_control_id)
         if context is None:
@@ -172,6 +191,9 @@ class CallContextStore:
             return None
         context.hangup_reason = self._clean_optional(hangup_reason) or "unknown"
         context.timer_state = "finished"
+        context.telnyx_api_key = None
+        context.configuration_failed = True
+        context.configuration_ready.set()
         if context.call_session_id:
             self._control_id_by_session.pop(context.call_session_id, None)
         return context

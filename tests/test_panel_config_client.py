@@ -59,7 +59,10 @@ def test_success_returns_prompt_without_logging_it(caplog):
                     "thinking_level": "low",
                 },
                 "credentials_status": {"gemini_configured": True, "telnyx_configured": True},
-                "runtime": {"gemini_credential_envelope": "encrypted-envelope-for-test"},
+                "runtime": {
+                    "gemini_credential_envelope": "encrypted-gemini-envelope-for-test",
+                    "telnyx_credential_envelope": "encrypted-telnyx-envelope-for-test",
+                },
                 "conversation": {
                     "max_call_seconds": 300,
                     "farewell_seconds_before_end": 20,
@@ -83,7 +86,8 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert result.farewell_seconds_before_end == 20
     assert result.time_warning_message == "Aviso privado de tiempo."
     assert result.final_farewell == "Despedida privada."
-    assert result.gemini_credential_envelope == "encrypted-envelope-for-test"
+    assert result.gemini_credential_envelope == "encrypted-gemini-envelope-for-test"
+    assert result.telnyx_credential_envelope == "encrypted-telnyx-envelope-for-test"
     assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in repr(result)
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/voice/resolve-agent"
@@ -96,7 +100,7 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert "Leda" not in caplog.text
 
 
-def test_invalid_runtime_credential_is_ignored_without_rejecting_the_prompt():
+def test_invalid_runtime_credentials_are_ignored_without_rejecting_the_prompt():
     async def handler(_request):
         return httpx.Response(
             200,
@@ -107,7 +111,10 @@ def test_invalid_runtime_credential_is_ignored_without_rejecting_the_prompt():
                     "name": "Luisa",
                     "system_prompt": "Prompt válido suficientemente largo para conservar la llamada activa.",
                 },
-                "runtime": {"gemini_credential_envelope": 42},
+                "runtime": {
+                    "gemini_credential_envelope": 42,
+                    "telnyx_credential_envelope": [],
+                },
             },
         )
 
@@ -117,6 +124,7 @@ def test_invalid_runtime_credential_is_ignored_without_rejecting_the_prompt():
 
     assert result is not None
     assert result.gemini_credential_envelope is None
+    assert result.telnyx_credential_envelope is None
 
 
 def test_http_error_is_controlled_without_sensitive_logs(caplog):

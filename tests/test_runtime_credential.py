@@ -5,7 +5,10 @@ import json
 import pytest
 from cryptography.fernet import Fernet
 
-from runtime_credential import decrypt_gemini_credential_for_voice
+from runtime_credential import (
+    decrypt_gemini_credential_for_voice,
+    decrypt_telnyx_credential_for_voice,
+)
 
 
 SECRET = "shared-secret-only-for-runtime-envelope-tests"
@@ -19,6 +22,21 @@ def make_envelope(*, agent_id=1, client_id=2, key="gemini-client-key-test"):
             "agent_id": agent_id,
             "client_id": client_id,
             "gemini_api_key": key,
+        },
+        separators=(",", ":"),
+    ).encode()
+    return Fernet(transport_key).encrypt(payload).decode()
+
+
+def make_telnyx_envelope(*, agent_id=1, client_id=2, key="telnyx-client-key-test"):
+    transport_key = base64.urlsafe_b64encode(hashlib.sha256(SECRET.encode()).digest())
+    payload = json.dumps(
+        {
+            "version": 1,
+            "credential_type": "telnyx",
+            "agent_id": agent_id,
+            "client_id": client_id,
+            "telnyx_api_key": key,
         },
         separators=(",", ":"),
     ).encode()
@@ -49,4 +67,39 @@ def test_rejects_a_credential_outside_its_call_identity(agent_id, client_id, sec
             agent_id=agent_id,
             client_id=client_id,
             shared_secret=secret,
+        )
+
+
+def test_decrypts_telnyx_credential_bound_to_the_resolved_agent_and_business():
+    selected = decrypt_telnyx_credential_for_voice(
+        envelope=make_telnyx_envelope(),
+        agent_id=1,
+        client_id=2,
+        shared_secret=SECRET,
+    )
+
+    assert selected == "telnyx-client-key-test"
+
+
+@pytest.mark.parametrize(
+    "agent_id,client_id,secret",
+    [(9, 2, SECRET), (1, 9, SECRET), (1, 2, "different-secret")],
+)
+def test_rejects_telnyx_credential_outside_its_call_identity(agent_id, client_id, secret):
+    with pytest.raises(ValueError, match="runtime credential"):
+        decrypt_telnyx_credential_for_voice(
+            envelope=make_telnyx_envelope(),
+            agent_id=agent_id,
+            client_id=client_id,
+            shared_secret=secret,
+        )
+
+
+def test_rejects_gemini_envelope_as_telnyx_credential():
+    with pytest.raises(ValueError, match="runtime credential"):
+        decrypt_telnyx_credential_for_voice(
+            envelope=make_envelope(),
+            agent_id=1,
+            client_id=2,
+            shared_secret=SECRET,
         )

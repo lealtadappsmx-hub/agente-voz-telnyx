@@ -116,3 +116,22 @@ def test_context_queues_one_closing_message_only_when_runtime_is_ready():
     assert store.complete_closure_turn("control-a") == "time_warning"
     assert context.closure_turn_finished.is_set() is True
     assert store.is_closing("control-a") is False
+
+
+def test_telnyx_credential_is_ephemeral_and_cleared_when_call_finishes():
+    store = CallContextStore()
+    context = store.register(
+        call_control_id="control-a",
+        call_session_id="session-a",
+        from_number="caller-a",
+        to_number="called-a",
+    )
+
+    assert store.set_telnyx_api_key("control-a", "telnyx-private-key-test") is True
+    assert context.telnyx_api_key == "telnyx-private-key-test"
+    assert "telnyx-private-key-test" not in repr(context)
+
+    finished = store.finish("control-a", "normal_clearing")
+
+    assert finished is context
+    assert finished.telnyx_api_key is None
