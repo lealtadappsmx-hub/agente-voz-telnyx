@@ -14,6 +14,7 @@ from google.genai import types
 
 from call_context import CallContextStore
 from call_duration import closing_deadlines
+from gemini_key_selector import select_gemini_api_key
 from panel_config_client import (
     CallDurationSettings,
     PanelObservationSettings,
@@ -93,14 +94,9 @@ sus datos para que un desarrollador del equipo se comunique con ellos.
 # COMPROBAR LAS VARIABLES DE EASYPANEL
 # ---------------------------------------------------------
 
-def revisar_variables():
+def revisar_variables() -> str:
     telnyx_api_key = os.getenv(
         "TELNYX_API_KEY",
-        "",
-    ).strip()
-
-    gemini_api_key = os.getenv(
-        "GEMINI_API_KEY",
         "",
     ).strip()
 
@@ -109,12 +105,7 @@ def revisar_variables():
             "Falta la variable TELNYX_API_KEY en EasyPanel."
         )
 
-    if not gemini_api_key:
-        raise RuntimeError(
-            "Falta la variable GEMINI_API_KEY en EasyPanel."
-        )
-
-    return telnyx_api_key, gemini_api_key
+    return telnyx_api_key
 
 
 # ---------------------------------------------------------
@@ -129,7 +120,7 @@ async def colgar_llamada_telnyx(
     una llamada activa.
     """
 
-    telnyx_api_key, _ = revisar_variables()
+    telnyx_api_key = revisar_variables()
 
     url = (
         "https://api.telnyx.com/v2/calls/"
@@ -403,7 +394,7 @@ async def contestar_y_abrir_audio(
     abrir un WebSocket bidireccional.
     """
 
-    telnyx_api_key, _ = revisar_variables()
+    telnyx_api_key = revisar_variables()
 
     url = (
         "https://api.telnyx.com/v2/calls/"
@@ -950,9 +941,11 @@ async def websocket_audio_telnyx(
             f"voice={voice_name} thinking={thinking_level}."
         )
 
-        _, gemini_api_key = (
-            revisar_variables()
+        gemini_api_key = select_gemini_api_key(
+            call_context.agent_config,
+            shared_secret=PANEL_OBSERVATION_SETTINGS.shared_secret,
         )
+        print("Credencial Gemini preparada: source=negocio.")
 
         cliente_gemini = genai.Client(
             api_key=gemini_api_key

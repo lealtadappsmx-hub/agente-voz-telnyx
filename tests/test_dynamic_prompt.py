@@ -1,4 +1,9 @@
 import pytest
+import base64
+import hashlib
+import json
+
+from cryptography.fernet import Fernet
 
 from call_duration import closing_deadlines
 from panel_config_client import (
@@ -8,6 +13,7 @@ from panel_config_client import (
     select_live_session_settings,
     select_system_prompt,
 )
+from gemini_key_selector import select_gemini_api_key
 
 
 SYSTEM_PROMPT = "Prompt fijo de respaldo que ya funcionaba antes de la integración."
@@ -121,3 +127,45 @@ def test_final_farewell_starts_at_the_configured_limit_when_there_is_no_warning(
 
     assert warning_start is None
     assert final_farewell_start == 90
+
+
+def _runtime_envelope(secret: str, *, agent_id: int, client_id: int, key: str) -> str:
+    transport_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return Fernet(transport_key).encrypt(
+        json.dumps(
+            {
+                "version": 1,
+                "agent_id": agent_id,
+                "client_id": client_id,
+                "gemini_api_key": key,
+            },
+            separators=(",", ":"),
+        ).encode()
+    ).decode()
+
+
+def test_client_gemini_key_is_required_for_the_resolved_call():
+    secret = "runtime-secret-for-selection"
+    observation = agent_config()
+    observation = PanelAgentObservation(
+        **{
+            **observation.__dict__,
+            "gemini_credential_envelope": _runtime_envelope(
+                secret, agent_id=1, client_id=1, key="client-gemini-key"
+            ),
+        }
+    )
+    key = select_gemini_api_key(
+        observation,
+        shared_secret=secret,
+    )
+
+    assert key == "client-gemini-key"
+
+
+def test_missing_client_gemini_key_rejects_the_call_without_a_global_fallback():
+    with pytest.raises(RuntimeError, match="credencial Gemini válida"):
+        select_gemini_api_key(
+            None,
+            shared_secret="test-secret",
+        )

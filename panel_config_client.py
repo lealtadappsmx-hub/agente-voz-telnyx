@@ -103,6 +103,7 @@ class PanelAgentObservation:
     farewell_seconds_before_end: int = 0
     time_warning_message: str | None = field(default=None, repr=False)
     final_farewell: str | None = field(default=None, repr=False)
+    gemini_credential_envelope: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,10 @@ async def observe_panel_agent(
         farewell_seconds_before_end = conversation.get("farewell_seconds_before_end")
         time_warning_message = conversation.get("time_warning_message")
         final_farewell = conversation.get("final_farewell")
+        runtime = payload.get("runtime")
+        if not isinstance(runtime, dict):
+            runtime = {}
+        gemini_credential_envelope = runtime.get("gemini_credential_envelope")
         if (
             type(agent_id) is not int
             or type(client_id) is not int
@@ -233,6 +238,10 @@ async def observe_panel_agent(
         safe_prompt = system_prompt.strip()
         if not safe_name or not (20 <= len(safe_prompt) <= 60000):
             raise ValueError("invalid agent configuration")
+        if not isinstance(gemini_credential_envelope, str):
+            gemini_credential_envelope = None
+        elif not gemini_credential_envelope.strip() or len(gemini_credential_envelope) > 10_000:
+            gemini_credential_envelope = None
     except (KeyError, TypeError, ValueError):
         logger.warning("Panel no observado: reason=invalid_response elapsed_ms=%.2f", elapsed_ms)
         return None
@@ -249,6 +258,7 @@ async def observe_panel_agent(
         farewell_seconds_before_end=farewell_seconds_before_end,
         time_warning_message=_selected_control_text(time_warning_message),
         final_farewell=_selected_control_text(final_farewell),
+        gemini_credential_envelope=gemini_credential_envelope,
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",
