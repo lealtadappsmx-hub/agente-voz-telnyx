@@ -30,6 +30,7 @@ class CallContext:
     closure_queue: asyncio.Queue[tuple[str, str]] = field(default_factory=asyncio.Queue, repr=False)
     closure_phase: str | None = None
     transfer_state: str = "idle"
+    clear_media_pending: bool = False
 
 
 class CallContextStore:
@@ -195,9 +196,22 @@ class CallContextStore:
 
     def begin_transfer(self, call_control_id: str) -> bool:
         context = self.get(call_control_id=call_control_id)
-        if context is None or context.transfer_state != "idle" or not context.runtime_ready.is_set():
+        if (
+            context is None
+            or context.transfer_state != "idle"
+            or context.closure_phase is not None
+            or not context.runtime_ready.is_set()
+        ):
             return False
         context.transfer_state = "announcing"
+        context.clear_media_pending = True
+        return True
+
+    def consume_media_clear(self, call_control_id: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None or not context.clear_media_pending:
+            return False
+        context.clear_media_pending = False
         return True
 
     def set_transfer_state(self, call_control_id: str, state: str) -> bool:

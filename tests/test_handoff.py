@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from handoff import (
     TRANSFER_CALL_FUNCTION_NAME,
     select_handoff_settings,
@@ -5,6 +7,9 @@ from handoff import (
     transfer_call_tool_declaration,
     validate_transfer_call_request,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def configured_handoff():
@@ -27,6 +32,8 @@ def test_handoff_accepts_only_panel_configured_destination_and_no_arguments():
     assert validate_transfer_call_request(TRANSFER_CALL_FUNCTION_NAME, {"to": "+526688999999"}, settings) is True
     assert "+526688000001" not in repr(settings)
     assert "TRANSFER_CALL" in transfer_call_runtime_instruction(settings)
+    assert "No anuncies" in transfer_call_runtime_instruction(settings)
+    assert "no lo pronuncies" in tool["description"]
 
 
 def test_handoff_rejects_invalid_destination_or_missing_failure_message():
@@ -34,3 +41,12 @@ def test_handoff_rejects_invalid_destination_or_missing_failure_message():
     missing_message = {**configured_handoff(), "failure_message": ""}
     assert select_handoff_settings(invalid_destination).enabled is False
     assert select_handoff_settings(missing_message).enabled is False
+
+
+def test_transfer_uses_telnyx_for_one_announcement_and_detaches_ai_after_bridge():
+    source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+    assert "/actions/speak" in source
+    assert 'event_type == "call.speak.ended"' in source
+    assert "/actions/streaming_stop" in source
+    assert "IA desconectada tras transferencia humana" in source

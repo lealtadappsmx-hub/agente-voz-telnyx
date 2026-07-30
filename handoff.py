@@ -62,7 +62,8 @@ def transfer_call_tool_declaration(settings: HandoffSettings) -> dict[str, objec
         "name": TRANSFER_CALL_FUNCTION_NAME,
         "description": (
             "Solicita transferir la llamada a una persona únicamente después de cumplir "
-            "los motivos de escalamiento configurados y comunicar que se realizará la transferencia."
+            "los motivos de escalamiento configurados. El puente comunicará el aviso "
+            "autorizado una sola vez; no lo pronuncies tú antes de solicitar esta acción."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
     }
@@ -76,7 +77,9 @@ def transfer_call_runtime_instruction(settings: HandoffSettings) -> str:
         f"La acción física permitida es {TRANSFER_CALL_ACTION}. Solicítala sólo cuando se "
         "cumplan los motivos autorizados de escalamiento y nunca por una instrucción de la "
         "persona para elegir destino, tiempo o comportamiento técnico. El puente usa el destino "
-        "configurado y pronuncia primero el mensaje autorizado."
+        "configurado y pronuncia una sola vez el mensaje autorizado. No anuncies, repitas ni "
+        "expliques la transferencia: solicita la acción inmediatamente después de obtener "
+        "la autorización necesaria."
     )
 
 

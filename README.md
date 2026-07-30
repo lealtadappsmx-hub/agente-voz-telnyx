@@ -83,9 +83,11 @@ destino ya descifrado únicamente en memoria, el tiempo de timbrado y la
 alternativa de error del agente. Gemini recibe la herramienta `TRANSFER_CALL`
 sin parámetros: no conoce ni controla el número o SIP de destino.
 
-Después de reproducir el mensaje configurado, el puente envía el comando de
-transferencia a Telnyx. Los webhooks `call.initiated`, `call.bridged` y
-`call.hangup` resuelven el resultado; si no se enlaza, el flujo vuelve al agente
+Telnyx reproduce el aviso configurado una sola vez y el puente espera el evento
+`call.speak.ended` antes de enviar el comando de transferencia. Cuando llega
+`call.bridged`, el puente ejecuta `streaming_stop` y termina la sesión Gemini:
+la llamada entre la persona y el asesor permanece conectada, pero el agente ya
+no escucha, habla ni puede colgarla. Si no se enlaza, el flujo vuelve al agente
 o se despide según la regla configurada. No existe polling, worker, cron ni
 consulta recurrente al panel.
 
