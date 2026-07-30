@@ -118,6 +118,18 @@ class CallDurationSettings:
     final_farewell: str | None = field(default=None, repr=False)
 
 
+@dataclass(frozen=True)
+class OutboundCallClaim:
+    """Una reserva puntual del panel; no contiene datos aptos para logs."""
+
+    campaign_id: int
+    recipient_id: int
+    to_number: str = field(repr=False)
+    from_number: str = field(repr=False)
+    connection_id: str = field(repr=False)
+    observation: PanelAgentObservation = field(repr=False)
+
+
 def select_system_prompt(
     agent_config: PanelAgentObservation | None,
     fallback_prompt: str,
@@ -286,3 +298,102 @@ async def observe_panel_agent(
         observation.elapsed_ms,
     )
     return observation
+
+
+def _observation_from_payload(payload: object, elapsed_ms: float) -> PanelAgentObservation | None:
+    """Valida la misma respuesta firmada que usa la ruta entrante, sin registrar secretos."""
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("invalid payload")
+        agent = payload["agent"]
+        if not isinstance(agent, dict):
+            raise ValueError("invalid agent")
+        agent_id, client_id = agent["id"], agent["client_id"]
+        agent_name, system_prompt = agent["name"], agent["system_prompt"]
+        conversation = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
+        runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        if type(agent_id) is not int or type(client_id) is not int or not isinstance(agent_name, str) or not isinstance(system_prompt, str):
+            raise ValueError("invalid observation fields")
+        safe_name, safe_prompt = _safe_log_name(agent_name), system_prompt.strip()
+        if not safe_name or not (20 <= len(safe_prompt) <= 60000):
+            raise ValueError("invalid agent configuration")
+        gemini_envelope = runtime.get("gemini_credential_envelope")
+        telnyx_envelope = runtime.get("telnyx_credential_envelope")
+        if not isinstance(gemini_envelope, str) or not gemini_envelope.strip() or len(gemini_envelope) > 10_000:
+            gemini_envelope = None
+        if not isinstance(telnyx_envelope, str) or not telnyx_envelope.strip() or len(telnyx_envelope) > 10_000:
+            telnyx_envelope = None
+        return PanelAgentObservation(
+            agent_id=agent_id, client_id=client_id, agent_name=safe_name, system_prompt=safe_prompt,
+            elapsed_ms=elapsed_ms, voice_name=_selected_voice_name(agent.get("voice_name")),
+            thinking_level=_selected_thinking_level(agent.get("thinking_level")),
+            max_call_seconds=conversation.get("max_call_seconds"),
+            farewell_seconds_before_end=conversation.get("farewell_seconds_before_end"),
+            time_warning_message=_selected_control_text(conversation.get("time_warning_message")),
+            final_farewell=_selected_control_text(conversation.get("final_farewell")),
+            gemini_credential_envelope=gemini_envelope, telnyx_credential_envelope=telnyx_envelope,
+            end_call=payload.get("end_call") if isinstance(payload.get("end_call"), dict) else {},
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def claim_outbound_call(
+    campaign_id: int,
+    settings: PanelObservationSettings | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> OutboundCallClaim | None:
+    """Pide exactamente un destino disponible. La concurrencia se valida en PostgreSQL."""
+    config = settings or PanelObservationSettings.from_environment()
+    if not config.enabled or campaign_id < 1 or not config.base_url.startswith("https://") or not config.shared_secret:
+        return None
+    started_at = perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.timeout_seconds), limits=httpx.Limits(max_connections=1, max_keepalive_connections=0), transport=transport, follow_redirects=False) as client:
+            response = await client.post(
+                f"{config.base_url}/internal/v1/voice/outbound/claim",
+                headers={"X-Voice-Service-Key": config.shared_secret}, json={"campaign_id": campaign_id},
+            )
+    except httpx.HTTPError:
+        logger.warning("Outbound no reclamado: reason=request_failed")
+        return None
+    if response.status_code != 200:
+        logger.warning("Outbound no reclamado: reason=http_status status_code=%s", response.status_code)
+        return None
+    elapsed_ms = (perf_counter() - started_at) * 1000
+    try:
+        payload = response.json()
+        if payload.get("available") is False:
+            return None
+        campaign = payload["campaign"]
+        outbound = payload["outbound"]
+        observation = _observation_from_payload(payload, elapsed_ms)
+        campaign_id_value, recipient_id = campaign["id"], campaign["recipient_id"]
+        to_number, from_number, connection_id = outbound["to_number"], outbound["from_number"], outbound["connection_id"]
+        if (type(campaign_id_value) is not int or type(recipient_id) is not int or not all(isinstance(value, str) and value.strip() for value in (to_number, from_number, connection_id)) or observation is None):
+            raise ValueError("invalid outbound payload")
+        return OutboundCallClaim(campaign_id_value, recipient_id, to_number.strip(), from_number.strip(), connection_id.strip(), observation)
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Outbound no reclamado: reason=invalid_response")
+        return None
+
+
+async def report_outbound_event(
+    *, campaign_id: int, recipient_id: int, result: str,
+    settings: PanelObservationSettings | None = None,
+) -> bool:
+    """Notifica una sola vez el resultado; no reintenta ni ejecuta polling."""
+    config = settings or PanelObservationSettings.from_environment()
+    if result not in {"completed", "failed"} or campaign_id < 1 or recipient_id < 1 or not config.enabled or not config.base_url.startswith("https://") or not config.shared_secret:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.timeout_seconds), limits=httpx.Limits(max_connections=1, max_keepalive_connections=0), follow_redirects=False) as client:
+            response = await client.post(
+                f"{config.base_url}/internal/v1/voice/outbound/events",
+                headers={"X-Voice-Service-Key": config.shared_secret},
+                json={"campaign_id": campaign_id, "recipient_id": recipient_id, "result": result},
+            )
+        return response.status_code == 200
+    except httpx.HTTPError:
+        logger.warning("Outbound no confirmado: reason=request_failed")
+        return False

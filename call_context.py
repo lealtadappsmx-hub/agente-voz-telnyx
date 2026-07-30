@@ -15,6 +15,9 @@ class CallContext:
     call_session_id: str | None
     from_number: str | None
     to_number: str
+    direction: str = "inbound"
+    outbound_campaign_id: int | None = None
+    outbound_recipient_id: int | None = None
     agent_config: PanelAgentObservation | None = None
     telnyx_api_key: str | None = field(default=None, repr=False)
     configuration_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -49,6 +52,9 @@ class CallContextStore:
         call_session_id: str | None,
         from_number: str | None,
         to_number: str,
+        direction: str = "inbound",
+        outbound_campaign_id: int | None = None,
+        outbound_recipient_id: int | None = None,
     ) -> CallContext:
         control_id = self._clean_optional(call_control_id)
         if control_id is None:
@@ -63,6 +69,9 @@ class CallContextStore:
             call_session_id=self._clean_optional(call_session_id),
             from_number=self._clean_optional(from_number),
             to_number=self._clean_optional(to_number) or "",
+            direction="outbound" if direction == "outbound" else "inbound",
+            outbound_campaign_id=outbound_campaign_id if type(outbound_campaign_id) is int and outbound_campaign_id > 0 else None,
+            outbound_recipient_id=outbound_recipient_id if type(outbound_recipient_id) is int and outbound_recipient_id > 0 else None,
         )
         self._by_control_id[control_id] = context
         if context.call_session_id:

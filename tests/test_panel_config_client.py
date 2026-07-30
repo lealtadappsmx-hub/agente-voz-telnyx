@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 
-from panel_config_client import PanelObservationSettings, observe_panel_agent
+from panel_config_client import PanelObservationSettings, claim_outbound_call, observe_panel_agent
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -208,6 +208,29 @@ def test_invalid_response_is_ignored():
         observe_panel_agent(TEST_PHONE, settings=settings(), transport=httpx.MockTransport(handler))
     )
     assert result is None
+
+
+def test_outbound_claim_uses_private_contract_without_logging_number_or_secret(caplog):
+    destination = "+526688000001"
+
+    async def handler(request):
+        assert request.url.path == "/internal/v1/voice/outbound/claim"
+        assert json.loads(request.content) == {"campaign_id": 9}
+        return httpx.Response(200, json={
+            "available": True,
+            "campaign": {"id": 9, "recipient_id": 41},
+            "outbound": {"to_number": destination, "from_number": TEST_PHONE, "connection_id": "connection-private"},
+            "agent": {"id": 1, "client_id": 1, "name": "Luisa", "system_prompt": "Prompt válido suficientemente largo para conservar la llamada activa."},
+            "runtime": {"gemini_credential_envelope": "gemini-envelope", "telnyx_credential_envelope": "telnyx-envelope"},
+            "conversation": {"max_call_seconds": 180, "farewell_seconds_before_end": 0},
+        })
+
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    result = asyncio.run(claim_outbound_call(9, settings=settings(), transport=httpx.MockTransport(handler)))
+    assert result is not None
+    assert (result.campaign_id, result.recipient_id, result.to_number) == (9, 41, destination)
+    assert destination not in caplog.text
+    assert TEST_SECRET not in caplog.text
 
 
 def test_short_or_missing_prompt_is_rejected_without_exposure(caplog):

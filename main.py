@@ -2,6 +2,7 @@ import json
 import base64
 import asyncio
 import audioop
+import secrets
 from time import monotonic
 
 import httpx
@@ -25,7 +26,9 @@ from gemini_key_selector import select_gemini_api_key
 from panel_config_client import (
     CallDurationSettings,
     PanelObservationSettings,
+    claim_outbound_call,
     observe_panel_agent,
+    report_outbound_event,
     select_call_duration_settings,
     select_live_session_settings,
     select_system_prompt,
@@ -55,6 +58,13 @@ TAREAS_CORTE = {}
 
 # Contextos efímeros de las llamadas activas. No usan base de datos ni polling.
 CALL_CONTEXTS = CallContextStore()
+
+# Serializa únicamente la reserva/creación de llamadas salientes. No es un
+# worker: se ejecuta por clic explícito o por el webhook call.hangup.
+OUTBOUND_START_LOCK = asyncio.Lock()
+# Asociación efímera para el raro caso de que el webhook llegue antes de la
+# respuesta HTTP de Dial. Se elimina al asociar el control o si falla el dial.
+PENDING_OUTBOUND_CALLS = {}
 
 # Configuración inmutable del panel. Cada llamada realiza una sola resolución.
 PANEL_OBSERVATION_SETTINGS = PanelObservationSettings.from_environment()
@@ -544,6 +554,93 @@ async def preparar_y_contestar_llamada(
     await contestar_y_abrir_audio(call_control_id)
 
 
+async def _start_one_outbound_call(campaign_id: int) -> bool:
+    """Reclama y marca una llamada. Toda continuación ocurre por eventos Telnyx."""
+    async with OUTBOUND_START_LOCK:
+        claim = await claim_outbound_call(campaign_id, settings=PANEL_OBSERVATION_SETTINGS)
+        if claim is None:
+            return False
+        try:
+            telnyx_api_key = select_telnyx_api_key(
+                claim.observation, shared_secret=PANEL_OBSERVATION_SETTINGS.shared_secret,
+            )
+            # Validamos Gemini antes de marcar para no crear una llamada muda.
+            select_gemini_api_key(claim.observation, shared_secret=PANEL_OBSERVATION_SETTINGS.shared_secret)
+            headers = {"Authorization": f"Bearer {telnyx_api_key}", "Content-Type": "application/json", "Accept": "application/json"}
+            client_state = base64.b64encode(secrets.token_bytes(24)).decode("ascii")
+            PENDING_OUTBOUND_CALLS[client_state] = (claim, telnyx_api_key)
+            payload = {
+                "connection_id": claim.connection_id,
+                "from": claim.from_number,
+                "to": claim.to_number,
+                "stream_url": TELNYX_WS_URL,
+                "stream_track": "inbound_track",
+                "stream_codec": "PCMU",
+                "stream_bidirectional_mode": "rtp",
+                "stream_bidirectional_codec": "PCMU",
+                "send_silence_when_idle": True,
+                # Telnyx también aplica un límite físico, además del cierre del puente.
+                "timeout_secs": 30,
+                "time_limit_secs": claim.observation.max_call_seconds,
+                "client_state": client_state,
+            }
+            async with httpx.AsyncClient(timeout=20.0, limits=httpx.Limits(max_connections=1, max_keepalive_connections=0)) as client:
+                response = await client.post("https://api.telnyx.com/v2/calls", headers=headers, json=payload)
+            response.raise_for_status()
+            call_control_id = response.json().get("data", {}).get("call_control_id")
+            if not isinstance(call_control_id, str) or not call_control_id.strip():
+                raise RuntimeError("Telnyx no devolvió el control de la llamada")
+            PENDING_OUTBOUND_CALLS.pop(client_state, None)
+            if CALL_CONTEXTS.get(call_control_id=call_control_id) is None:
+                CALL_CONTEXTS.register(
+                    call_control_id=call_control_id, call_session_id=None,
+                    from_number=claim.from_number, to_number=claim.to_number, direction="outbound",
+                    outbound_campaign_id=claim.campaign_id, outbound_recipient_id=claim.recipient_id,
+                )
+                CALL_CONTEXTS.set_agent_config(call_control_id, claim.observation)
+                CALL_CONTEXTS.set_telnyx_api_key(call_control_id, telnyx_api_key)
+                CALL_CONTEXTS.mark_configuration_ready(call_control_id, True)
+            print("Llamada saliente solicitada a Telnyx: campaign=active.")
+            return True
+        except Exception as error:
+            if "client_state" in locals():
+                PENDING_OUTBOUND_CALLS.pop(client_state, None)
+            await report_outbound_event(
+                campaign_id=claim.campaign_id, recipient_id=claim.recipient_id, result="failed",
+                settings=PANEL_OBSERVATION_SETTINGS,
+            )
+            print(f"ERROR iniciando llamada saliente: {type(error).__name__}")
+            return False
+
+
+async def start_outbound_campaign(campaign_id: int) -> int:
+    """Llena hasta tres lugares permitidos mediante reclamaciones transaccionales puntuales."""
+    started = 0
+    for _ in range(3):
+        if not await _start_one_outbound_call(campaign_id):
+            break
+        started += 1
+    return started
+
+
+@app.post("/internal/v1/outbound/start")
+async def start_outbound(request: Request):
+    """Entrada privada invocada por el botón del panel, nunca por el navegador."""
+    shared_secret = PANEL_OBSERVATION_SETTINGS.shared_secret
+    supplied_secret = request.headers.get("X-Voice-Service-Key", "")
+    if not shared_secret or not secrets.compare_digest(supplied_secret, shared_secret):
+        return JSONResponse({"status": "error"}, status_code=401)
+    try:
+        payload = await request.json()
+        campaign_id = payload.get("campaign_id") if isinstance(payload, dict) else None
+        if type(campaign_id) is not int or campaign_id < 1:
+            raise ValueError("invalid campaign")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return JSONResponse({"status": "error"}, status_code=400)
+    started = await start_outbound_campaign(campaign_id)
+    return JSONResponse({"status": "ok", "started": started})
+
+
 # ---------------------------------------------------------
 # WEBHOOK DE TELNYX
 # ---------------------------------------------------------
@@ -596,6 +693,33 @@ async def telnyx_webhook(
 
             called_number = event_payload.get("to", "")
 
+            existing_context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+            if existing_context and existing_context.direction == "outbound":
+                CALL_CONTEXTS.link_session(
+                    call_control_id=call_control_id,
+                    call_session_id=event_payload.get("call_session_id"),
+                )
+                print("Llamada saliente iniciada por Telnyx.")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            pending_outbound = PENDING_OUTBOUND_CALLS.pop(event_payload.get("client_state"), None)
+            if pending_outbound:
+                claim, telnyx_api_key = pending_outbound
+                CALL_CONTEXTS.register(
+                    call_control_id=call_control_id,
+                    call_session_id=event_payload.get("call_session_id"),
+                    from_number=event_payload.get("from"),
+                    to_number=called_number,
+                    direction="outbound",
+                    outbound_campaign_id=claim.campaign_id,
+                    outbound_recipient_id=claim.recipient_id,
+                )
+                CALL_CONTEXTS.set_agent_config(call_control_id, claim.observation)
+                CALL_CONTEXTS.set_telnyx_api_key(call_control_id, telnyx_api_key)
+                CALL_CONTEXTS.mark_configuration_ready(call_control_id, True)
+                print("Llamada saliente iniciada por Telnyx.")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
             CALL_CONTEXTS.register(
                 call_control_id=call_control_id,
                 call_session_id=event_payload.get("call_session_id"),
@@ -618,6 +742,16 @@ async def telnyx_webhook(
                 )
             )
 
+        elif event_type == "call.answered":
+            call_control_id = event_payload.get("call_control_id")
+            context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+            if context and context.direction == "outbound" and CALL_CONTEXTS.mark_answered(call_control_id):
+                iniciar_temporizador_llamada(
+                    call_control_id,
+                    select_call_duration_settings(context.agent_config),
+                )
+                print("Llamada saliente contestada.")
+
         # La llamada terminó antes de los
         # cinco minutos o fue cortada por Telnyx.
         elif event_type == "call.hangup":
@@ -631,10 +765,26 @@ async def telnyx_webhook(
                 call_control_id
             )
 
-            CALL_CONTEXTS.finish(
+            finished_context = CALL_CONTEXTS.finish(
                 call_control_id,
                 event_payload.get("hangup_cause"),
             )
+
+            if (
+                finished_context
+                and finished_context.direction == "outbound"
+                and finished_context.outbound_campaign_id
+                and finished_context.outbound_recipient_id
+            ):
+                outcome = "completed" if finished_context.answered_at_monotonic is not None else "failed"
+                await report_outbound_event(
+                    campaign_id=finished_context.outbound_campaign_id,
+                    recipient_id=finished_context.outbound_recipient_id,
+                    result=outcome,
+                    settings=PANEL_OBSERVATION_SETTINGS,
+                )
+                # Cada hangup llena sólo un lugar liberado, sin bucles de consulta.
+                asyncio.create_task(start_outbound_campaign(finished_context.outbound_campaign_id))
 
             print(
                 "Llamada terminada. Temporizador y contexto eliminados. "
@@ -1115,14 +1265,18 @@ async def websocket_audio_telnyx(
             )
             CALL_CONTEXTS.mark_runtime_ready(call_control_id, True)
 
-            # El agente inicia hablando.
+            # El agente inicia hablando; en salida usa el saludo de prospección.
+            opening_instruction = (
+                "Inicia la llamada ahora siguiendo exactamente la identidad, el saludo saliente "
+                "y las reglas definidas en tus instrucciones. Preséntate brevemente, confirma si es "
+                "buen momento para hablar y no asumas interés previo."
+                if call_context.direction == "outbound"
+                else "Inicia la llamada ahora siguiendo exactamente la identidad, el saludo entrante y las "
+                "reglas definidas en tus instrucciones. Si no existe un saludo específico, preséntate "
+                "brevemente y pregunta cómo puedes ayudar."
+            )
             await session.send_realtime_input(
-                text=(
-                    "Inicia la llamada ahora siguiendo exactamente la identidad, "
-                    "el saludo entrante y las reglas definidas en tus instrucciones. "
-                    "Si no existe un saludo específico, preséntate brevemente y "
-                    "pregunta cómo puedes ayudar."
-                )
+                text=opening_instruction
             )
 
             tarea_entrada = (

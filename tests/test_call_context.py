@@ -41,6 +41,17 @@ def test_two_calls_keep_independent_contexts():
     assert store.active_count == 2
 
 
+def test_outbound_context_keeps_campaign_reference_without_exposing_numbers():
+    store = CallContextStore()
+    context = store.register(
+        call_control_id="outbound-control", call_session_id=None,
+        from_number="caller-private", to_number="destination-private", direction="outbound",
+        outbound_campaign_id=7, outbound_recipient_id=19,
+    )
+    assert context.direction == "outbound"
+    assert (context.outbound_campaign_id, context.outbound_recipient_id) == (7, 19)
+
+
 def test_finishing_one_call_does_not_remove_the_other():
     store = CallContextStore()
     first = store.register(

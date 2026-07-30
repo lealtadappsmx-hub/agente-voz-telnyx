@@ -43,6 +43,16 @@ call.initiated
 
 No existe polling ni consulta al panel por cada turno.
 
+## Llamadas salientes
+
+El administrador del panel inicia una campaña o una llamada directa. El
+puente autentica esa única orden, reclama de PostgreSQL un destinatario ya
+cifrado por medio del panel y ejecuta `POST /v2/calls` de Telnyx usando la API
+key, Call Control Application y número del negocio correcto. Al recibir
+`call.hangup`, notifica el resultado al panel y reclama como máximo un nuevo
+destinatario para llenar el lugar liberado. La simultaneidad se limita en
+PostgreSQL a 1–3 llamadas y no hay worker, cron ni polling.
+
 ## Webhooks aislados por negocio
 
 El puente acepta temporalmente la ruta histórica `/webhooks/telnyx` y la ruta
