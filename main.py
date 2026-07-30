@@ -22,6 +22,14 @@ from end_call import (
     select_end_call_settings,
     validate_end_call_request,
 )
+from handoff import (
+    TRANSFER_CALL_ACTION,
+    HandoffSettings,
+    select_handoff_settings,
+    transfer_call_runtime_instruction,
+    transfer_call_tool_declaration,
+    validate_transfer_call_request,
+)
 from gemini_key_selector import select_gemini_api_key
 from panel_config_client import (
     CallDurationSettings,
@@ -55,6 +63,7 @@ CLOSING_AUDIO_TIMEOUT_SECONDS = 12
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
+TAREAS_TRANSFER = {}
 
 # Contextos efímeros de las llamadas activas. No usan base de datos ni polling.
 CALL_CONTEXTS = CallContextStore()
@@ -65,6 +74,7 @@ OUTBOUND_START_LOCK = asyncio.Lock()
 # Asociación efímera para el raro caso de que el webhook llegue antes de la
 # respuesta HTTP de Dial. Se elimina al asociar el control o si falla el dial.
 PENDING_OUTBOUND_CALLS = {}
+PENDING_TRANSFER_LEGS = {}
 
 # Configuración inmutable del panel. Cada llamada realiza una sola resolución.
 PANEL_OBSERVATION_SETTINGS = PanelObservationSettings.from_environment()
@@ -355,6 +365,94 @@ def iniciar_cierre_por_end_call(
     )
     print(f"END_CALL preparado: reason={reason}.")
     return True
+
+
+async def _informar_fallo_transferencia(
+    call_control_id: str,
+    settings: HandoffSettings,
+) -> None:
+    """Mantiene o cierra la llamada original según la política ya configurada."""
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context is None:
+        return
+    phase = "transfer_failed_farewell" if settings.failure_mode == "farewell" else "transfer_failed"
+    queued = CALL_CONTEXTS.request_closure_message(call_control_id, phase, settings.failure_message or "")
+    if not queued:
+        CALL_CONTEXTS.set_transfer_state(call_control_id, "idle")
+        return
+    finished = await _wait_for_closing_turn(call_control_id, CLOSING_AUDIO_TIMEOUT_SECONDS)
+    if settings.failure_mode == "farewell":
+        if finished:
+            await colgar_llamada_telnyx(call_control_id)
+        CALL_CONTEXTS.finish(call_control_id, "transfer_unavailable")
+    else:
+        CALL_CONTEXTS.set_transfer_state(call_control_id, "idle")
+    print("Transferencia humana no disponible; se aplicó la política configurada.")
+
+
+async def _ejecutar_transferencia_despues_del_aviso(
+    call_control_id: str,
+    settings: HandoffSettings,
+) -> None:
+    """Espera un único turno de aviso y manda un único comando Telnyx."""
+    try:
+        if not await _wait_for_closing_turn(call_control_id, CLOSING_AUDIO_TIMEOUT_SECONDS):
+            CALL_CONTEXTS.set_transfer_state(call_control_id, "idle")
+            print("Transferencia cancelada: no se confirmó el aviso de audio.")
+            return
+        context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+        if context is None or context.transfer_state != "announcing":
+            return
+        telnyx_api_key = _telnyx_api_key_for_call(call_control_id)
+        target_state = base64.b64encode(secrets.token_bytes(24)).decode("ascii")
+        PENDING_TRANSFER_LEGS[target_state] = (call_control_id, settings)
+        caller_id = context.from_number if context.direction == "outbound" else context.to_number
+        payload = {
+            "to": settings.destination,
+            "from": caller_id,
+            "timeout_secs": settings.timeout_seconds,
+            "target_leg_client_state": target_state,
+        }
+        async with httpx.AsyncClient(timeout=20.0, limits=httpx.Limits(max_connections=1, max_keepalive_connections=0)) as client:
+            response = await client.post(
+                f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/transfer",
+                headers={"Authorization": f"Bearer {telnyx_api_key}", "Content-Type": "application/json", "Accept": "application/json"},
+                json=payload,
+            )
+        response.raise_for_status()
+        CALL_CONTEXTS.set_transfer_state(call_control_id, "dialing")
+        print("Transferencia humana solicitada a Telnyx.")
+    except Exception as error:
+        if "target_state" in locals():
+            PENDING_TRANSFER_LEGS.pop(target_state, None)
+        print(f"ERROR solicitando transferencia humana: {type(error).__name__}")
+        await _informar_fallo_transferencia(call_control_id, settings)
+    finally:
+        if TAREAS_TRANSFER.get(call_control_id) is asyncio.current_task():
+            TAREAS_TRANSFER.pop(call_control_id, None)
+
+
+def iniciar_transferencia_humana(call_control_id: str, settings: HandoffSettings) -> bool:
+    """Acepta una sola transferencia por llamada y nunca toma destinos desde Gemini."""
+    if not settings.enabled or not CALL_CONTEXTS.begin_transfer(call_control_id):
+        return False
+    queued = CALL_CONTEXTS.request_closure_message(
+        call_control_id, "transfer_announcement", settings.announcement or ""
+    )
+    if not queued:
+        CALL_CONTEXTS.set_transfer_state(call_control_id, "idle")
+        return False
+    TAREAS_TRANSFER[call_control_id] = asyncio.create_task(
+        _ejecutar_transferencia_despues_del_aviso(call_control_id, settings)
+    )
+    print("Transferencia humana preparada.")
+    return True
+
+
+def cancelar_transferencia(call_control_id: str) -> None:
+    task = TAREAS_TRANSFER.pop(call_control_id, None)
+    if task and not task.done():
+        task.cancel()
 
 
 def cancelar_temporizador_llamada(
@@ -702,6 +800,12 @@ async def telnyx_webhook(
                 print("Llamada saliente iniciada por Telnyx.")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
+            # La nueva pierna hacia el asesor no es una llamada entrante: se
+            # identifica con estado efímero y no abre Gemini ni otro contexto.
+            if event_payload.get("client_state") in PENDING_TRANSFER_LEGS:
+                print("Pierna de transferencia humana iniciada por Telnyx.")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
             pending_outbound = PENDING_OUTBOUND_CALLS.pop(event_payload.get("client_state"), None)
             if pending_outbound:
                 claim, telnyx_api_key = pending_outbound
@@ -742,6 +846,17 @@ async def telnyx_webhook(
                 )
             )
 
+        elif event_type == "call.bridged":
+            call_control_id = event_payload.get("call_control_id")
+            context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+            if context and context.transfer_state == "dialing":
+                CALL_CONTEXTS.set_transfer_state(call_control_id, "bridged")
+                cancelar_temporizador_llamada(call_control_id)
+                for token, pending in tuple(PENDING_TRANSFER_LEGS.items()):
+                    if pending[0] == call_control_id:
+                        PENDING_TRANSFER_LEGS.pop(token, None)
+                print("Transferencia humana conectada.")
+
         elif event_type == "call.answered":
             call_control_id = event_payload.get("call_control_id")
             context = CALL_CONTEXTS.get(call_control_id=call_control_id)
@@ -761,9 +876,18 @@ async def telnyx_webhook(
                 )
             )
 
+            pending_transfer = PENDING_TRANSFER_LEGS.pop(event_payload.get("client_state"), None)
+            if pending_transfer:
+                original_call_control_id, handoff_settings = pending_transfer
+                original_context = CALL_CONTEXTS.get(call_control_id=original_call_control_id)
+                if original_context and original_context.transfer_state == "dialing":
+                    await _informar_fallo_transferencia(original_call_control_id, handoff_settings)
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
             cancelar_temporizador_llamada(
                 call_control_id
             )
+            cancelar_transferencia(call_control_id)
 
             finished_context = CALL_CONTEXTS.finish(
                 call_control_id,
@@ -964,24 +1088,38 @@ async def enviar_instrucciones_de_cierre_a_gemini(
 
     while True:
         phase, message = await context.closure_queue.get()
-        await session.send_realtime_input(
-            text=(
-                "Cierra la llamada ahora. Pronuncia exactamente el mensaje "
-                "autorizado a continuación, sin agregar explicaciones, "
-                "preguntas ni datos nuevos; después termina tu turno. "
+        if phase == "transfer_announcement":
+            instruction = (
+                "Comunica ahora exactamente el mensaje autorizado para transferir, sin agregar "
+                "preguntas, explicaciones ni datos nuevos; después termina tu turno. "
                 f"Mensaje autorizado: {message}"
             )
+        elif phase == "transfer_failed":
+            instruction = (
+                "La transferencia no fue posible. Comunica exactamente el mensaje autorizado, "
+                "sin mencionar datos técnicos, y continúa atendiendo normalmente. "
+                f"Mensaje autorizado: {message}"
+            )
+        else:
+            instruction = (
+                "Cierra la llamada ahora. Pronuncia exactamente el mensaje autorizado a continuación, "
+                "sin agregar explicaciones, preguntas ni datos nuevos; después termina tu turno. "
+                f"Mensaje autorizado: {message}"
+            )
+        await session.send_realtime_input(
+            text=instruction
         )
-        print(f"Instrucción de cierre enviada a Gemini: phase={phase}.")
+        print(f"Instrucción controlada enviada a Gemini: phase={phase}.")
 
 
 async def procesar_end_call_de_gemini(
     session,
     call_control_id: str,
     settings: EndCallSettings,
+    handoff_settings: HandoffSettings,
     tool_call,
 ):
-    """Valida la única herramienta de cierre y confirma el resultado a Gemini."""
+    """Valida sólo las acciones físicas cerradas y confirma el resultado a Gemini."""
     function_responses = []
     for function_call in tool_call.function_calls or []:
         reason = validate_end_call_request(
@@ -989,11 +1127,14 @@ async def procesar_end_call_de_gemini(
             function_call.args,
             settings,
         )
-        accepted = bool(reason and iniciar_cierre_por_end_call(call_control_id, reason, settings))
-        if accepted:
-            result = {"action": END_CALL_ACTION, "status": "accepted"}
+        if reason:
+            accepted = iniciar_cierre_por_end_call(call_control_id, reason, settings)
+            result = {"action": END_CALL_ACTION, "status": "accepted" if accepted else "rejected"}
+        elif validate_transfer_call_request(function_call.name, function_call.args, handoff_settings):
+            accepted = iniciar_transferencia_humana(call_control_id, handoff_settings)
+            result = {"action": TRANSFER_CALL_ACTION, "status": "accepted" if accepted else "rejected"}
         else:
-            result = {"action": END_CALL_ACTION, "status": "rejected"}
+            result = {"action": "CONTROLLED_ACTION", "status": "rejected"}
         function_responses.append(
             types.FunctionResponse(
                 id=function_call.id,
@@ -1011,6 +1152,7 @@ async def enviar_audio_gemini_a_telnyx(
     session,
     call_control_id: str,
     end_call_settings: EndCallSettings,
+    handoff_settings: HandoffSettings,
 ):
     """
     Recibe continuamente el audio PCM
@@ -1037,6 +1179,7 @@ async def enviar_audio_gemini_a_telnyx(
                     session,
                     call_control_id,
                     end_call_settings,
+                    handoff_settings,
                     tool_call,
                 )
 
@@ -1213,6 +1356,7 @@ async def websocket_audio_telnyx(
             PANEL_OBSERVATION_SETTINGS,
         )
         end_call_settings = select_end_call_settings(call_context.agent_config.end_call)
+        handoff_settings = select_handoff_settings(call_context.agent_config.handoff)
         voice_name, thinking_level = select_live_session_settings(call_context.agent_config)
         print(f"Prompt de llamada preparado: source={prompt_source}.")
         print(
@@ -1235,7 +1379,9 @@ async def websocket_audio_telnyx(
                 "AUDIO"
             ],
             "system_instruction": (
-                system_prompt + end_call_runtime_instruction(end_call_settings)
+                system_prompt
+                + end_call_runtime_instruction(end_call_settings)
+                + transfer_call_runtime_instruction(handoff_settings)
             ),
             "speech_config": {
                 "voice_config": {
@@ -1248,9 +1394,12 @@ async def websocket_audio_telnyx(
                 "thinking_level": thinking_level
             },
         }
-        end_call_tool = end_call_tool_declaration(end_call_settings)
-        if end_call_tool:
-            configuracion["tools"] = [{"function_declarations": [end_call_tool]}]
+        function_declarations = [tool for tool in (
+            end_call_tool_declaration(end_call_settings),
+            transfer_call_tool_declaration(handoff_settings),
+        ) if tool]
+        if function_declarations:
+            configuracion["tools"] = [{"function_declarations": function_declarations}]
 
         async with (
             cliente_gemini.aio.live.connect(
@@ -1296,6 +1445,7 @@ async def websocket_audio_telnyx(
                         session,
                         call_control_id,
                         end_call_settings,
+                        handoff_settings,
                     )
                 )
             )

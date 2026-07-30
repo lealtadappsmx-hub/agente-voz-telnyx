@@ -76,6 +76,19 @@ espera el audio con un límite de 12 segundos y ordena el hangup físico a
 Telnyx. Una orden verbal del interlocutor no es una autorización directa para
 colgar.
 
+## Transferencia humana
+
+Durante la única resolución de configuración, el panel entrega al puente el
+destino ya descifrado únicamente en memoria, el tiempo de timbrado y la
+alternativa de error del agente. Gemini recibe la herramienta `TRANSFER_CALL`
+sin parámetros: no conoce ni controla el número o SIP de destino.
+
+Después de reproducir el mensaje configurado, el puente envía el comando de
+transferencia a Telnyx. Los webhooks `call.initiated`, `call.bridged` y
+`call.hangup` resuelven el resultado; si no se enlaza, el flujo vuelve al agente
+o se despide según la regla configurada. No existe polling, worker, cron ni
+consulta recurrente al panel.
+
 ## Validación
 
 ```powershell

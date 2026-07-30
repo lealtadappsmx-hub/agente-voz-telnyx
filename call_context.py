@@ -29,6 +29,7 @@ class CallContext:
     closure_turn_finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     closure_queue: asyncio.Queue[tuple[str, str]] = field(default_factory=asyncio.Queue, repr=False)
     closure_phase: str | None = None
+    transfer_state: str = "idle"
 
 
 class CallContextStore:
@@ -191,6 +192,20 @@ class CallContextStore:
     def is_closing(self, call_control_id: str) -> bool:
         context = self.get(call_control_id=call_control_id)
         return bool(context and context.closure_phase)
+
+    def begin_transfer(self, call_control_id: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None or context.transfer_state != "idle" or not context.runtime_ready.is_set():
+            return False
+        context.transfer_state = "announcing"
+        return True
+
+    def set_transfer_state(self, call_control_id: str, state: str) -> bool:
+        context = self.get(call_control_id=call_control_id)
+        if context is None:
+            return False
+        context.transfer_state = state
+        return True
 
     def finish(
         self,

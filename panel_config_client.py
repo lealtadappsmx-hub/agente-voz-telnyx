@@ -106,6 +106,7 @@ class PanelAgentObservation:
     gemini_credential_envelope: str | None = field(default=None, repr=False)
     telnyx_credential_envelope: str | None = field(default=None, repr=False)
     end_call: dict[str, object] = field(default_factory=dict, repr=False)
+    handoff: dict[str, object] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,9 @@ async def observe_panel_agent(
         end_call = payload.get("end_call")
         if not isinstance(end_call, dict):
             end_call = {}
+        handoff = payload.get("handoff")
+        if not isinstance(handoff, dict):
+            handoff = {}
         runtime = payload.get("runtime")
         if not isinstance(runtime, dict):
             runtime = {}
@@ -289,6 +293,7 @@ async def observe_panel_agent(
         gemini_credential_envelope=gemini_credential_envelope,
         telnyx_credential_envelope=telnyx_credential_envelope,
         end_call=end_call,
+        handoff=handoff,
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",
@@ -333,6 +338,7 @@ def _observation_from_payload(payload: object, elapsed_ms: float) -> PanelAgentO
             final_farewell=_selected_control_text(conversation.get("final_farewell")),
             gemini_credential_envelope=gemini_envelope, telnyx_credential_envelope=telnyx_envelope,
             end_call=payload.get("end_call") if isinstance(payload.get("end_call"), dict) else {},
+            handoff=payload.get("handoff") if isinstance(payload.get("handoff"), dict) else {},
         )
     except (KeyError, TypeError, ValueError):
         return None
