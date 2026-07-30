@@ -168,6 +168,7 @@ async def observe_panel_agent(
     called_number: str,
     settings: PanelObservationSettings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    webhook_token: str | None = None,
 ) -> PanelAgentObservation | None:
     """Consulta una vez la configuración del agente para una llamada entrante."""
     config = settings or PanelObservationSettings.from_environment()
@@ -190,10 +191,15 @@ async def observe_panel_agent(
             transport=transport,
             follow_redirects=False,
         ) as client:
+            request_payload = {"called_number": called_number, "direction": "inbound"}
+            # El token llega exclusivamente desde la ruta privada del webhook.
+            # No se registra ni se conserva en el contexto de llamada.
+            if webhook_token is not None:
+                request_payload["webhook_token"] = webhook_token
             response = await client.post(
                 f"{config.base_url}/internal/v1/voice/resolve-agent",
                 headers={"X-Voice-Service-Key": config.shared_secret},
-                json={"called_number": called_number, "direction": "inbound"},
+                json=request_payload,
             )
     except httpx.HTTPError:
         elapsed_ms = (perf_counter() - started_at) * 1000

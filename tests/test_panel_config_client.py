@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -106,6 +107,43 @@ def test_success_returns_prompt_without_logging_it(caplog):
     assert TEST_PHONE not in caplog.text
     assert "PROMPT-MUY-SENSIBLE-Y-COMPLETO" not in caplog.text
     assert "Leda" not in caplog.text
+
+
+def test_business_webhook_token_is_forwarded_once_and_never_logged(caplog):
+    webhook_token = "webhook_token_for_a_single_business_123456"
+    captured = {}
+
+    async def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "agent": {
+                    "id": 1,
+                    "client_id": 1,
+                    "name": "Luisa",
+                    "system_prompt": "Prompt válido suficientemente largo para conservar la llamada activa.",
+                },
+            },
+        )
+
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    result = asyncio.run(
+        observe_panel_agent(
+            TEST_PHONE,
+            settings=settings(),
+            transport=httpx.MockTransport(handler),
+            webhook_token=webhook_token,
+        )
+    )
+
+    assert result is not None
+    assert captured["body"] == {
+        "called_number": TEST_PHONE,
+        "direction": "inbound",
+        "webhook_token": webhook_token,
+    }
+    assert webhook_token not in caplog.text
 
 
 def test_invalid_runtime_credentials_are_ignored_without_rejecting_the_prompt():

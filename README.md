@@ -43,6 +43,19 @@ call.initiated
 
 No existe polling ni consulta al panel por cada turno.
 
+## Webhooks aislados por negocio
+
+El puente acepta temporalmente la ruta histórica `/webhooks/telnyx` y la ruta
+privada `/webhooks/telnyx/{token}`. Para cada negocio activo se configura en
+Telnyx únicamente la ruta privada que muestra el panel. Al recibirla, el
+puente usa el token una sola vez en la resolución HTTPS al panel; no lo guarda
+en el contexto de la llamada ni lo registra. El panel verifica que token,
+negocio y número Telnyx correspondan antes de entregar credenciales.
+
+La ruta sin token es sólo compatibilidad de despliegue y debe retirarse cuando
+todos los negocios hayan migrado. Esto no añade workers, polling ni consultas
+durante el audio.
+
 ## END_CALL
 
 El panel entrega en la única resolución por llamada las reglas ya configuradas

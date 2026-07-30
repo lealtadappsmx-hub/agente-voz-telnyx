@@ -391,11 +391,13 @@ def iniciar_temporizador_llamada(
 async def observar_y_guardar_contexto(
     call_control_id: str,
     called_number: str,
+    webhook_token: str | None = None,
 ):
     """Resuelve una vez el agente y adjunta sus credenciales efímeras."""
     observation = await observe_panel_agent(
         called_number,
         settings=PANEL_OBSERVATION_SETTINGS,
+        webhook_token=webhook_token,
     )
     if observation is None:
         CALL_CONTEXTS.mark_configuration_ready(call_control_id, False)
@@ -527,11 +529,13 @@ async def contestar_y_abrir_audio(
 async def preparar_y_contestar_llamada(
     call_control_id: str,
     called_number: str,
+    webhook_token: str | None = None,
 ):
     """Resuelve el negocio antes de contestar; no usa credenciales globales."""
     observation = await observar_y_guardar_contexto(
         call_control_id,
         called_number,
+        webhook_token,
     )
     if observation is None:
         CALL_CONTEXTS.finish(call_control_id, "configuration_unavailable")
@@ -545,8 +549,10 @@ async def preparar_y_contestar_llamada(
 # ---------------------------------------------------------
 
 @app.post("/webhooks/telnyx")
+@app.post("/webhooks/telnyx/{webhook_token}")
 async def telnyx_webhook(
     request: Request,
+    webhook_token: str | None = None,
 ):
     """
     Recibe los eventos enviados por Telnyx.
@@ -608,6 +614,7 @@ async def telnyx_webhook(
                 preparar_y_contestar_llamada(
                     call_control_id,
                     called_number,
+                    webhook_token,
                 )
             )
 
