@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 from end_call import (
     END_CALL_FUNCTION_NAME,
     end_call_runtime_instruction,
@@ -5,6 +8,9 @@ from end_call import (
     select_end_call_settings,
     validate_end_call_request,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def configured_rules():
@@ -71,3 +77,16 @@ def test_missing_or_disabled_rules_do_not_expose_an_end_call_tool():
     assert settings.enabled is False
     assert end_call_tool_declaration(settings) is None
     assert end_call_runtime_instruction(settings) == ""
+
+
+def test_end_call_settings_are_passed_only_to_the_gemini_output_task():
+    source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+    calls = {
+        node.func.id: len(node.args)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in {"enviar_audio_gemini_a_telnyx", "enviar_instrucciones_de_cierre_a_gemini"}
+    }
+
+    assert calls["enviar_audio_gemini_a_telnyx"] == 4
+    assert calls["enviar_instrucciones_de_cierre_a_gemini"] == 2

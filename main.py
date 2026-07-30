@@ -1134,6 +1134,7 @@ async def websocket_audio_telnyx(
                         websocket,
                         session,
                         call_control_id,
+                        end_call_settings,
                     )
                 )
             )
@@ -1142,7 +1143,6 @@ async def websocket_audio_telnyx(
                 enviar_instrucciones_de_cierre_a_gemini(
                     session,
                     call_control_id,
-                    end_call_settings,
                 )
             )
 
