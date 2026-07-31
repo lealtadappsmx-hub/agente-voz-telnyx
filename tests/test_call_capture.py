@@ -1,6 +1,8 @@
 from call_capture import (
     SAVE_CALL_FOLLOWUP_FUNCTION,
     SAVE_CALL_INTAKE_FUNCTION,
+    capture_runtime_instruction,
+    intake_tool_declaration,
     select_capture_settings,
     validate_followup_request,
     validate_intake_request,
@@ -27,3 +29,18 @@ def test_followup_requires_configured_channel_and_valid_contact():
     assert validate_followup_request(SAVE_CALL_FOLLOWUP_FUNCTION, {
         "channel": "email", "email": "persona@ejemplo.com"
     }, settings) is None
+
+
+def test_intake_instruction_requires_immediate_capture_without_authorization():
+    settings = select_capture_settings({
+        "intake_enabled": True,
+        "capture_name": True,
+        "capture_reason": True,
+    })
+    declaration = intake_tool_declaration(settings)
+    instruction = capture_runtime_instruction(settings)
+
+    assert declaration is not None
+    assert "OBLIGATORIA" in declaration["description"]
+    assert "antes de hacer otra pregunta" in instruction
+    assert "No esperes una confirmación extra" in instruction

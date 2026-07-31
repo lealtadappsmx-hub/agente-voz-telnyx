@@ -482,7 +482,9 @@ async def report_call_intake(
                 json={"agent_id": agent_id, "external_call_id": external_call_id, "name": name,
                       "contact_reason": contact_reason, "reason_summary": reason_summary, "confirmed": True},
             )
-        return response.status_code == 200
+        accepted = response.status_code == 200
+        logger.info("Ficha de llamada enviada: status=%s", "accepted" if accepted else "rejected")
+        return accepted
     except httpx.HTTPError:
         logger.warning("Ficha de llamada no confirmada")
         return False
@@ -506,7 +508,9 @@ async def report_call_followup(
                 json={"agent_id": agent_id, "external_call_id": external_call_id, "channel": channel, "caller_number_has_whatsapp": caller_number_has_whatsapp,
                       "whatsapp_phone": whatsapp_phone, "email": email, "consent_confirmed": True},
             )
-        return response.status_code == 200
+        accepted = response.status_code == 200
+        logger.info("Seguimiento autorizado enviado: status=%s", "accepted" if accepted else "rejected")
+        return accepted
     except httpx.HTTPError:
         logger.warning("Seguimiento de llamada no confirmado")
         return False

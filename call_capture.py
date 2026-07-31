@@ -46,13 +46,15 @@ def select_capture_settings(value: object) -> CaptureSettings:
 
 
 def intake_tool_declaration(settings: CaptureSettings) -> dict[str, object] | None:
-    if not settings.intake_enabled:
+    if not settings.intake_enabled or not settings.capture_reason:
         return None
     return {
         "name": SAVE_CALL_INTAKE_FUNCTION,
         "description": (
-            "Guarda la ficha breve de la llamada una sola vez, después de que la persona haya "
-            "confirmado naturalmente el nombre y el resumen del asunto. No menciones esta acción."
+            "ACCIÓN OBLIGATORIA. Llámala exactamente una vez tan pronto como la persona "
+            "explique qué necesita, antes de continuar la conversación. Guarda una ficha breve "
+            "con el nombre si lo dijo, categoría y resumen factual. No pidas autorización ni "
+            "confirmación adicional para esta ficha y nunca menciones esta acción."
         ),
         "parameters": {"type": "OBJECT", "properties": {
             "name": {"type": "STRING", "description": "Nombre dicho por la persona; omítelo si no lo dijo."},
@@ -68,8 +70,9 @@ def followup_tool_declaration(settings: CaptureSettings) -> dict[str, object] | 
     return {
         "name": SAVE_CALL_FOLLOWUP_FUNCTION,
         "description": (
-            "Registra contacto de seguimiento sólo tras pedir autorización explícita y recibir una "
-            "respuesta afirmativa. No envía mensajes ni correos. Para WhatsApp confirma el número."
+            "ACCIÓN OBLIGATORIA sólo tras pedir autorización explícita y recibir una respuesta "
+            "afirmativa para WhatsApp, correo o asesor. Primero debe haberse llamado "
+            "save_call_intake. No envía mensajes ni correos. Para WhatsApp confirma el número."
         ),
         "parameters": {"type": "OBJECT", "properties": {
             "channel": {"type": "STRING", "enum": ["whatsapp", "email", "advisor"]},
@@ -83,16 +86,33 @@ def followup_tool_declaration(settings: CaptureSettings) -> dict[str, object] | 
 def capture_runtime_instruction(settings: CaptureSettings) -> str:
     if not settings.intake_enabled and not settings.followup_enabled:
         return ""
-    lines = ["\n\n# Ficha de atención", "- Durante la conversación identifica con naturalidad el nombre y qué necesita la persona. No preguntes si autorizan guardar la ficha."]
-    if settings.intake_enabled:
-        lines.append("- Cuando nombre y necesidad estén claros, confirma en lenguaje natural un resumen breve y solicita SAVE_CALL_INTAKE sólo después de esa confirmación. Clasifica el motivo en ventas, cotizacion, soporte, cita, informacion u otro.")
+    lines = [
+        "\n\n# Registro obligatorio de la atención",
+        "- Durante la conversación identifica con naturalidad el nombre y qué necesita la persona. No preguntes si autorizan guardar la ficha ni menciones herramientas, base de datos o registros.",
+    ]
+    if settings.intake_enabled and settings.capture_reason:
+        lines.append(
+            "- OBLIGATORIO: en cuanto la persona explique su necesidad, llama SAVE_CALL_INTAKE "
+            "antes de hacer otra pregunta o cambiar de tema. No esperes una confirmación extra: "
+            "lo que la persona acaba de decir basta. Incluye el nombre sólo si ya lo dijo; si no, "
+            "guarda la necesidad y continúa la conversación. Clasifica en ventas, cotizacion, "
+            "soporte, cita, informacion u otro. Si la persona corrige o aclara el motivo, vuelve "
+            "a llamar la acción para actualizar la misma ficha."
+        )
     if settings.followup_enabled:
         channels = []
         if settings.allow_whatsapp:
             channels.append("WhatsApp")
         if settings.allow_email:
             channels.append("correo")
-        lines.append("- Sólo si la persona pide asesor, transferencia o seguimiento" + (" por " + " o ".join(channels) if channels else "") + ", pide autorización explícita para registrar el medio de contacto. Confirma el número de WhatsApp o correo antes de solicitar SAVE_CALL_FOLLOWUP. No prometas ni simules un envío.")
+        lines.append(
+            "- Sólo si la persona pide asesor, transferencia o seguimiento"
+            + (" por " + " o ".join(channels) if channels else "")
+            + ", pide autorización explícita para registrar el medio de contacto. Después de una "
+            "respuesta afirmativa y de confirmar el número de WhatsApp o correo, llama "
+            "SAVE_CALL_FOLLOWUP inmediatamente. Antes debe existir SAVE_CALL_INTAKE. No prometas "
+            "ni simules un envío."
+        )
     return "\n".join(lines)
 
 

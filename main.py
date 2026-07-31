@@ -1273,6 +1273,7 @@ async def procesar_end_call_de_gemini(
             accepted = iniciar_transferencia_humana(call_control_id, handoff_settings)
             result = {"action": TRANSFER_CALL_ACTION, "status": "accepted" if accepted else "rejected"}
         elif intake := validate_intake_request(function_call.name, function_call.args, capture_settings):
+            print("Acción de ficha de atención recibida desde Gemini.")
             if context.agent_config is None:
                 accepted = False
             else:
@@ -1284,7 +1285,9 @@ async def procesar_end_call_de_gemini(
                     settings=PANEL_OBSERVATION_SETTINGS,
                 )
             result = {"action": SAVE_CALL_INTAKE_ACTION, "status": "accepted" if accepted else "rejected"}
+            print(f"Ficha de atención procesada: status={result['status']}.")
         elif followup := validate_followup_request(function_call.name, function_call.args, capture_settings):
+            print("Acción de seguimiento autorizado recibida desde Gemini.")
             if context.agent_config is None:
                 accepted = False
             else:
@@ -1295,6 +1298,7 @@ async def procesar_end_call_de_gemini(
                     email=followup["email"], settings=PANEL_OBSERVATION_SETTINGS,
                 )
             result = {"action": SAVE_CALL_FOLLOWUP_ACTION, "status": "accepted" if accepted else "rejected"}
+            print(f"Seguimiento autorizado procesado: status={result['status']}.")
         else:
             result = {"action": "CONTROLLED_ACTION", "status": "rejected"}
         function_responses.append(
@@ -1539,6 +1543,12 @@ async def websocket_audio_telnyx(
         print(
             "Configuración de Gemini Live preparada: "
             f"voice={voice_name} thinking={thinking_level}."
+        )
+        print(
+            "Captura de llamada preparada: "
+            f"ficha={capture_settings.intake_enabled and capture_settings.capture_reason} "
+            f"nombre={capture_settings.capture_name} "
+            f"seguimiento={capture_settings.followup_enabled}."
         )
 
         gemini_api_key = select_gemini_api_key(
