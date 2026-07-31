@@ -7,6 +7,12 @@ from call_capture import (
     validate_followup_request,
     validate_intake_request,
 )
+from panel_config_client import _capture_response_status
+
+
+class _Response:
+    def __init__(self, status_code):
+        self.status_code = status_code
 
 
 def test_intake_requires_closed_reason_and_short_summary():
@@ -44,3 +50,11 @@ def test_intake_instruction_requires_immediate_capture_without_authorization():
     assert "OBLIGATORIA" in declaration["description"]
     assert "antes de hacer otra pregunta" in instruction
     assert "No esperes una confirmación extra" in instruction
+
+
+def test_capture_status_exposes_only_safe_diagnostic_category():
+    assert _capture_response_status(_Response(200)) == "accepted"
+    assert _capture_response_status(_Response(401)) == "unauthorized"
+    assert _capture_response_status(_Response(404)) == "call_not_found"
+    assert _capture_response_status(_Response(409)) == "capture_disabled_or_prerequisite_missing"
+    assert _capture_response_status(_Response(503)) == "panel_database_unavailable"

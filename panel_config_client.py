@@ -15,6 +15,19 @@ import httpx
 logger = logging.getLogger("uvicorn.error")
 
 
+def _capture_response_status(response: httpx.Response) -> str:
+    """Describe sólo el resultado técnico; nunca registra cuerpo ni datos personales."""
+    labels = {
+        200: "accepted",
+        401: "unauthorized",
+        404: "call_not_found",
+        409: "capture_disabled_or_prerequisite_missing",
+        422: "invalid_payload",
+        503: "panel_database_unavailable",
+    }
+    return labels.get(response.status_code, "unexpected_response")
+
+
 # Gemini 3.1 Flash Live admite las voces predefinidas de Gemini TTS. Mantener
 # esta lista explícita evita enviar nombres arbitrarios desde el panel a la API.
 DEFAULT_VOICE_NAME = "Kore"
@@ -483,7 +496,10 @@ async def report_call_intake(
                       "contact_reason": contact_reason, "reason_summary": reason_summary, "confirmed": True},
             )
         accepted = response.status_code == 200
-        logger.info("Ficha de llamada enviada: status=%s", "accepted" if accepted else "rejected")
+        logger.info(
+            "Ficha de llamada enviada: status=%s http_status=%s",
+            _capture_response_status(response), response.status_code,
+        )
         return accepted
     except httpx.HTTPError:
         logger.warning("Ficha de llamada no confirmada")
@@ -509,7 +525,10 @@ async def report_call_followup(
                       "whatsapp_phone": whatsapp_phone, "email": email, "consent_confirmed": True},
             )
         accepted = response.status_code == 200
-        logger.info("Seguimiento autorizado enviado: status=%s", "accepted" if accepted else "rejected")
+        logger.info(
+            "Seguimiento autorizado enviado: status=%s http_status=%s",
+            _capture_response_status(response), response.status_code,
+        )
         return accepted
     except httpx.HTTPError:
         logger.warning("Seguimiento de llamada no confirmado")
