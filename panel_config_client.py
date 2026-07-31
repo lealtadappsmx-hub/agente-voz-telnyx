@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import perf_counter
 
 import httpx
@@ -402,4 +403,55 @@ async def report_outbound_event(
         return response.status_code == 200
     except httpx.HTTPError:
         logger.warning("Outbound no confirmado: reason=request_failed")
+        return False
+
+
+async def report_call_event(
+    *,
+    agent_id: int,
+    external_call_id: str,
+    call_session_id: str | None,
+    direction: str,
+    event_type: str,
+    from_number: str | None,
+    to_number: str | None,
+    hangup_cause: str | None = None,
+    termination_source: str | None = None,
+    termination_reason: str | None = None,
+    settings: PanelObservationSettings | None = None,
+) -> bool:
+    """Envía un único hecho de llamada; no reintenta ni contiene texto conversacional."""
+    config = settings or PanelObservationSettings.from_environment()
+    allowed_events = {
+        "initiated", "answered", "hangup", "failed",
+        "transfer_requested", "transfer_dialing", "transfer_bridged", "transfer_failed",
+    }
+    if (
+        agent_id < 1 or event_type not in allowed_events or direction not in {"inbound", "outbound"}
+        or not external_call_id.strip() or not config.enabled
+        or not config.base_url.startswith("https://") or not config.shared_secret
+    ):
+        return False
+    payload = {
+        "agent_id": agent_id,
+        "external_call_id": external_call_id,
+        "call_session_id": call_session_id,
+        "direction": direction,
+        "event_type": event_type,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "from_number": from_number,
+        "to_number": to_number,
+        "hangup_cause": hangup_cause,
+        "termination_source": termination_source,
+        "termination_reason": termination_reason,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.timeout_seconds), limits=httpx.Limits(max_connections=1, max_keepalive_connections=0), follow_redirects=False) as client:
+            response = await client.post(
+                f"{config.base_url}/internal/v1/voice/calls/events",
+                headers={"X-Voice-Service-Key": config.shared_secret}, json=payload,
+            )
+        return response.status_code == 200
+    except httpx.HTTPError:
+        logger.warning("Call event no confirmado: event=%s", event_type)
         return False

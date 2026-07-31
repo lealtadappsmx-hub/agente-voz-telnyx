@@ -37,6 +37,7 @@ from panel_config_client import (
     PanelObservationSettings,
     claim_outbound_call,
     observe_panel_agent,
+    report_call_event,
     report_outbound_event,
     select_call_duration_settings,
     select_live_session_settings,
@@ -126,6 +127,33 @@ def _telnyx_api_key_for_call(call_control_id: str) -> str:
     if context is None or not context.telnyx_api_key:
         raise RuntimeError("La llamada no tiene credencial Telnyx preparada.")
     return context.telnyx_api_key
+
+
+async def registrar_evento_llamada(
+    context,
+    event_type: str,
+    *,
+    hangup_cause: str | None = None,
+    termination_source: str | None = None,
+    termination_reason: str | None = None,
+) -> None:
+    """Registra un hecho puntual sólo si el panel ya resolvió el agente real."""
+    observation = context.agent_config if context else None
+    if observation is None:
+        return
+    await report_call_event(
+        agent_id=observation.agent_id,
+        external_call_id=context.call_control_id,
+        call_session_id=context.call_session_id,
+        direction=context.direction,
+        event_type=event_type,
+        from_number=context.from_number,
+        to_number=context.to_number,
+        hangup_cause=hangup_cause,
+        termination_source=termination_source,
+        termination_reason=termination_reason,
+        settings=PANEL_OBSERVATION_SETTINGS,
+    )
 
 
 # ---------------------------------------------------------
@@ -426,6 +454,7 @@ async def _solicitar_transferencia_humana(
             )
         response.raise_for_status()
         CALL_CONTEXTS.set_transfer_state(call_control_id, "dialing")
+        await registrar_evento_llamada(context, "transfer_dialing")
         print("Transferencia humana solicitada a Telnyx.")
     except Exception as error:
         if "target_state" in locals():
@@ -496,6 +525,9 @@ def iniciar_transferencia_humana(call_control_id: str, settings: HandoffSettings
     TAREAS_TRANSFER[call_control_id] = asyncio.create_task(
         _anunciar_transferencia_humana(call_control_id, settings)
     )
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    if context:
+        asyncio.create_task(registrar_evento_llamada(context, "transfer_requested"))
     print("Transferencia humana preparada.")
     return True
 
@@ -584,6 +616,8 @@ async def observar_y_guardar_contexto(
         return None
 
     CALL_CONTEXTS.mark_configuration_ready(call_control_id, True)
+    context = CALL_CONTEXTS.get(call_control_id=call_control_id)
+    await registrar_evento_llamada(context, "initiated")
     print("Configuración dinámica y credencial Telnyx adjuntadas al contexto.")
     return observation
 
@@ -755,6 +789,7 @@ async def _start_one_outbound_call(campaign_id: int) -> bool:
                 CALL_CONTEXTS.set_agent_config(call_control_id, claim.observation)
                 CALL_CONTEXTS.set_telnyx_api_key(call_control_id, telnyx_api_key)
                 CALL_CONTEXTS.mark_configuration_ready(call_control_id, True)
+            await registrar_evento_llamada(CALL_CONTEXTS.get(call_control_id=call_control_id), "initiated")
             print("Llamada saliente solicitada a Telnyx: campaign=active.")
             return True
         except Exception as error:
@@ -914,6 +949,7 @@ async def telnyx_webhook(
                     if pending[0] == call_control_id:
                         PENDING_TRANSFER_LEGS.pop(token, None)
                 asyncio.create_task(_detener_ia_despues_de_transferencia(call_control_id))
+                await registrar_evento_llamada(context, "transfer_bridged")
                 print("Transferencia humana conectada.")
 
         elif event_type == "call.speak.ended":
@@ -932,12 +968,13 @@ async def telnyx_webhook(
         elif event_type == "call.answered":
             call_control_id = event_payload.get("call_control_id")
             context = CALL_CONTEXTS.get(call_control_id=call_control_id)
-            if context and context.direction == "outbound" and CALL_CONTEXTS.mark_answered(call_control_id):
+            if context and CALL_CONTEXTS.mark_answered(call_control_id):
                 iniciar_temporizador_llamada(
                     call_control_id,
                     select_call_duration_settings(context.agent_config),
                 )
-                print("Llamada saliente contestada.")
+                await registrar_evento_llamada(context, "answered")
+                print("Llamada contestada.")
 
         # La llamada terminó antes de los
         # cinco minutos o fue cortada por Telnyx.
@@ -965,6 +1002,15 @@ async def telnyx_webhook(
                 call_control_id,
                 event_payload.get("hangup_cause"),
             )
+
+            if finished_context:
+                await registrar_evento_llamada(
+                    finished_context,
+                    "hangup",
+                    hangup_cause=event_payload.get("hangup_cause"),
+                    termination_source="provider",
+                    termination_reason=finished_context.hangup_reason,
+                )
 
             if (
                 finished_context
