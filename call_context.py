@@ -24,6 +24,7 @@ class CallContext:
     configuration_failed: bool = False
     timer_state: str = "pending"
     hangup_reason: str | None = None
+    termination_source: str | None = None
     answered_at_monotonic: float | None = None
     runtime_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     closure_turn_finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -232,7 +233,7 @@ class CallContextStore:
         context = self._by_control_id.pop(control_id, None)
         if context is None:
             return None
-        context.hangup_reason = self._clean_optional(hangup_reason) or "unknown"
+        context.hangup_reason = context.hangup_reason or self._clean_optional(hangup_reason) or "unknown"
         context.timer_state = "finished"
         context.telnyx_api_key = None
         context.configuration_failed = True
@@ -240,6 +241,15 @@ class CallContextStore:
         if context.call_session_id:
             self._control_id_by_session.pop(context.call_session_id, None)
         return context
+
+    def mark_termination(self, call_control_id: str, source: str, reason: str) -> bool:
+        """Conserva una causa local antes del webhook final de Telnyx."""
+        context = self.get(call_control_id=call_control_id)
+        if context is None or source not in {"agent_rule", "duration"}:
+            return False
+        context.termination_source = source
+        context.hangup_reason = self._clean_optional(reason) or "unknown"
+        return True
 
     @property
     def active_count(self) -> int:

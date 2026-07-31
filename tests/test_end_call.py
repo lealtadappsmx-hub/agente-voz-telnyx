@@ -88,5 +88,7 @@ def test_end_call_settings_are_passed_only_to_the_gemini_output_task():
         and node.func.id in {"enviar_audio_gemini_a_telnyx", "enviar_instrucciones_de_cierre_a_gemini"}
     }
 
-    assert calls["enviar_audio_gemini_a_telnyx"] == 5
+    # Además de cierre y transferencia, la salida recibe los ajustes cerrados
+    # de ficha de atención para procesar las acciones de Gemini por llamada.
+    assert calls["enviar_audio_gemini_a_telnyx"] == 6
     assert calls["enviar_instrucciones_de_cierre_a_gemini"] == 2

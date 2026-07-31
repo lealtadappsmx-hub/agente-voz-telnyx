@@ -1,0 +1,29 @@
+from call_capture import (
+    SAVE_CALL_FOLLOWUP_FUNCTION,
+    SAVE_CALL_INTAKE_FUNCTION,
+    select_capture_settings,
+    validate_followup_request,
+    validate_intake_request,
+)
+
+
+def test_intake_requires_closed_reason_and_short_summary():
+    settings = select_capture_settings({"intake_enabled": True, "capture_name": True})
+    assert validate_intake_request(SAVE_CALL_INTAKE_FUNCTION, {
+        "name": "  Ana  López ", "contact_reason": "cotizacion", "reason_summary": "Necesita una propuesta para su negocio."
+    }, settings) == {"name": "Ana López", "contact_reason": "cotizacion", "reason_summary": "Necesita una propuesta para su negocio."}
+    assert validate_intake_request(SAVE_CALL_INTAKE_FUNCTION, {"contact_reason": "libre", "reason_summary": "x"}, settings) is None
+
+
+def test_followup_requires_configured_channel_and_valid_contact():
+    settings = select_capture_settings({"followup_enabled": True, "allow_whatsapp": True})
+    assert validate_followup_request(SAVE_CALL_FOLLOWUP_FUNCTION, {
+        "channel": "whatsapp", "whatsapp_phone": "+526688000000"
+    }, settings) == {"channel": "whatsapp", "caller_number_has_whatsapp": None, "whatsapp_phone": "+526688000000", "email": None}
+    assert validate_followup_request(SAVE_CALL_FOLLOWUP_FUNCTION, {
+        "channel": "whatsapp", "caller_number_has_whatsapp": True
+    }, settings) == {"channel": "whatsapp", "caller_number_has_whatsapp": True, "whatsapp_phone": None, "email": None}
+    assert validate_followup_request(SAVE_CALL_FOLLOWUP_FUNCTION, {"channel": "whatsapp"}, settings) is None
+    assert validate_followup_request(SAVE_CALL_FOLLOWUP_FUNCTION, {
+        "channel": "email", "email": "persona@ejemplo.com"
+    }, settings) is None

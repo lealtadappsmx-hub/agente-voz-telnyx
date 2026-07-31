@@ -108,6 +108,7 @@ class PanelAgentObservation:
     telnyx_credential_envelope: str | None = field(default=None, repr=False)
     end_call: dict[str, object] = field(default_factory=dict, repr=False)
     handoff: dict[str, object] = field(default_factory=dict, repr=False)
+    capture: dict[str, object] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,9 @@ async def observe_panel_agent(
         handoff = payload.get("handoff")
         if not isinstance(handoff, dict):
             handoff = {}
+        capture = payload.get("capture")
+        if not isinstance(capture, dict):
+            capture = {}
         runtime = payload.get("runtime")
         if not isinstance(runtime, dict):
             runtime = {}
@@ -295,6 +299,7 @@ async def observe_panel_agent(
         telnyx_credential_envelope=telnyx_credential_envelope,
         end_call=end_call,
         handoff=handoff,
+        capture=capture,
     )
     logger.info(
         "Panel resuelto: agent_id=%s client_id=%s agent_name=%s prompt=ready elapsed_ms=%.2f",
@@ -340,6 +345,7 @@ def _observation_from_payload(payload: object, elapsed_ms: float) -> PanelAgentO
             gemini_credential_envelope=gemini_envelope, telnyx_credential_envelope=telnyx_envelope,
             end_call=payload.get("end_call") if isinstance(payload.get("end_call"), dict) else {},
             handoff=payload.get("handoff") if isinstance(payload.get("handoff"), dict) else {},
+            capture=payload.get("capture") if isinstance(payload.get("capture"), dict) else {},
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -454,4 +460,53 @@ async def report_call_event(
         return response.status_code == 200
     except httpx.HTTPError:
         logger.warning("Call event no confirmado: event=%s", event_type)
+        return False
+
+
+async def report_call_intake(
+    *, agent_id: int, external_call_id: str, name: str | None,
+    contact_reason: str, reason_summary: str,
+    settings: PanelObservationSettings | None = None,
+) -> bool:
+    """Envía una única ficha confirmada; nunca registra el contenido sensible en logs."""
+    config = settings or PanelObservationSettings.from_environment()
+    if (agent_id < 1 or contact_reason not in {"ventas", "cotizacion", "soporte", "cita", "informacion", "otro"}
+            or not external_call_id.strip() or not reason_summary.strip() or not config.enabled
+            or not config.base_url.startswith("https://") or not config.shared_secret):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.timeout_seconds), limits=httpx.Limits(max_connections=1, max_keepalive_connections=0), follow_redirects=False) as client:
+            response = await client.post(
+                f"{config.base_url}/internal/v1/voice/calls/intake",
+                headers={"X-Voice-Service-Key": config.shared_secret},
+                json={"agent_id": agent_id, "external_call_id": external_call_id, "name": name,
+                      "contact_reason": contact_reason, "reason_summary": reason_summary, "confirmed": True},
+            )
+        return response.status_code == 200
+    except httpx.HTTPError:
+        logger.warning("Ficha de llamada no confirmada")
+        return False
+
+
+async def report_call_followup(
+    *, agent_id: int, external_call_id: str, channel: str, caller_number_has_whatsapp: bool | None = None,
+    whatsapp_phone: str | None = None, email: str | None = None,
+    settings: PanelObservationSettings | None = None,
+) -> bool:
+    """Registra seguimiento sólo tras consentimiento; no envía WhatsApp ni correo."""
+    config = settings or PanelObservationSettings.from_environment()
+    if (agent_id < 1 or channel not in {"whatsapp", "email", "advisor"} or not external_call_id.strip()
+            or not config.enabled or not config.base_url.startswith("https://") or not config.shared_secret):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.timeout_seconds), limits=httpx.Limits(max_connections=1, max_keepalive_connections=0), follow_redirects=False) as client:
+            response = await client.post(
+                f"{config.base_url}/internal/v1/voice/calls/followup",
+                headers={"X-Voice-Service-Key": config.shared_secret},
+                json={"agent_id": agent_id, "external_call_id": external_call_id, "channel": channel, "caller_number_has_whatsapp": caller_number_has_whatsapp,
+                      "whatsapp_phone": whatsapp_phone, "email": email, "consent_confirmed": True},
+            )
+        return response.status_code == 200
+    except httpx.HTTPError:
+        logger.warning("Seguimiento de llamada no confirmado")
         return False

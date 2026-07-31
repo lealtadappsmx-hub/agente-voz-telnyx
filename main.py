@@ -31,12 +31,25 @@ from handoff import (
     transfer_call_tool_declaration,
     validate_transfer_call_request,
 )
+from call_capture import (
+    SAVE_CALL_FOLLOWUP_ACTION,
+    SAVE_CALL_INTAKE_ACTION,
+    CaptureSettings,
+    capture_runtime_instruction,
+    followup_tool_declaration,
+    intake_tool_declaration,
+    select_capture_settings,
+    validate_followup_request,
+    validate_intake_request,
+)
 from gemini_key_selector import select_gemini_api_key
 from panel_config_client import (
     CallDurationSettings,
     PanelObservationSettings,
     claim_outbound_call,
     observe_panel_agent,
+    report_call_followup,
+    report_call_intake,
     report_call_event,
     report_outbound_event,
     select_call_duration_settings,
@@ -319,6 +332,7 @@ async def cortar_llamada_por_tiempo(
             "La llamada alcanzó su límite configurado. "
             "Solicitando corte físico a Telnyx."
         )
+        CALL_CONTEXTS.mark_termination(call_control_id, "duration", "max_duration")
         await colgar_llamada_telnyx(call_control_id)
         CALL_CONTEXTS.finish(call_control_id, "max_duration")
 
@@ -361,8 +375,8 @@ async def cortar_llamada_por_end_call(
             print(f"Cierre de llamada sin confirmación de audio: reason={reason}.")
 
         print(f"END_CALL aceptado. Solicitando corte físico a Telnyx: reason={reason}.")
+        CALL_CONTEXTS.mark_termination(call_control_id, "agent_rule", reason)
         await colgar_llamada_telnyx(call_control_id)
-        CALL_CONTEXTS.finish(call_control_id, reason)
     except asyncio.CancelledError:
         print("Cierre END_CALL cancelado porque la llamada terminó antes.")
     finally:
@@ -1008,7 +1022,7 @@ async def telnyx_webhook(
                     finished_context,
                     "hangup" if finished_context.answered_at_monotonic is not None else "failed",
                     hangup_cause=event_payload.get("hangup_cause"),
-                    termination_source="provider",
+                    termination_source=finished_context.termination_source or "provider",
                     termination_reason=finished_context.hangup_reason,
                 )
 
@@ -1238,9 +1252,10 @@ async def procesar_end_call_de_gemini(
     call_control_id: str,
     settings: EndCallSettings,
     handoff_settings: HandoffSettings,
+    capture_settings: CaptureSettings,
     tool_call,
 ):
-    """Valida sólo las acciones físicas cerradas y confirma el resultado a Gemini."""
+    """Valida acciones físicas y de captura cerradas, sin exponer datos en logs."""
     context = CALL_CONTEXTS.get(call_control_id=call_control_id)
     if context is None or context.transfer_state != "idle":
         return
@@ -1257,6 +1272,29 @@ async def procesar_end_call_de_gemini(
         elif validate_transfer_call_request(function_call.name, function_call.args, handoff_settings):
             accepted = iniciar_transferencia_humana(call_control_id, handoff_settings)
             result = {"action": TRANSFER_CALL_ACTION, "status": "accepted" if accepted else "rejected"}
+        elif intake := validate_intake_request(function_call.name, function_call.args, capture_settings):
+            if context.agent_config is None:
+                accepted = False
+            else:
+                accepted = await report_call_intake(
+                    agent_id=context.agent_config.agent_id,
+                    external_call_id=context.call_control_id,
+                    name=intake["name"], contact_reason=intake["contact_reason"] or "otro",
+                    reason_summary=intake["reason_summary"] or "",
+                    settings=PANEL_OBSERVATION_SETTINGS,
+                )
+            result = {"action": SAVE_CALL_INTAKE_ACTION, "status": "accepted" if accepted else "rejected"}
+        elif followup := validate_followup_request(function_call.name, function_call.args, capture_settings):
+            if context.agent_config is None:
+                accepted = False
+            else:
+                accepted = await report_call_followup(
+                    agent_id=context.agent_config.agent_id,
+                    external_call_id=context.call_control_id,
+                    channel=followup["channel"] or "advisor", caller_number_has_whatsapp=followup["caller_number_has_whatsapp"], whatsapp_phone=followup["whatsapp_phone"],
+                    email=followup["email"], settings=PANEL_OBSERVATION_SETTINGS,
+                )
+            result = {"action": SAVE_CALL_FOLLOWUP_ACTION, "status": "accepted" if accepted else "rejected"}
         else:
             result = {"action": "CONTROLLED_ACTION", "status": "rejected"}
         function_responses.append(
@@ -1277,6 +1315,7 @@ async def enviar_audio_gemini_a_telnyx(
     call_control_id: str,
     end_call_settings: EndCallSettings,
     handoff_settings: HandoffSettings,
+    capture_settings: CaptureSettings,
 ):
     """
     Recibe continuamente el audio PCM
@@ -1304,6 +1343,7 @@ async def enviar_audio_gemini_a_telnyx(
                     call_control_id,
                     end_call_settings,
                     handoff_settings,
+                    capture_settings,
                     tool_call,
                 )
 
@@ -1493,6 +1533,7 @@ async def websocket_audio_telnyx(
         )
         end_call_settings = select_end_call_settings(call_context.agent_config.end_call)
         handoff_settings = select_handoff_settings(call_context.agent_config.handoff)
+        capture_settings = select_capture_settings(call_context.agent_config.capture)
         voice_name, thinking_level = select_live_session_settings(call_context.agent_config)
         print(f"Prompt de llamada preparado: source={prompt_source}.")
         print(
@@ -1518,6 +1559,7 @@ async def websocket_audio_telnyx(
                 system_prompt
                 + end_call_runtime_instruction(end_call_settings)
                 + transfer_call_runtime_instruction(handoff_settings)
+                + capture_runtime_instruction(capture_settings)
             ),
             "speech_config": {
                 "voice_config": {
@@ -1533,6 +1575,8 @@ async def websocket_audio_telnyx(
         function_declarations = [tool for tool in (
             end_call_tool_declaration(end_call_settings),
             transfer_call_tool_declaration(handoff_settings),
+            intake_tool_declaration(capture_settings),
+            followup_tool_declaration(capture_settings),
         ) if tool]
         if function_declarations:
             configuracion["tools"] = [{"function_declarations": function_declarations}]
@@ -1582,6 +1626,7 @@ async def websocket_audio_telnyx(
                         call_control_id,
                         end_call_settings,
                         handoff_settings,
+                        capture_settings,
                     )
                 )
             )
