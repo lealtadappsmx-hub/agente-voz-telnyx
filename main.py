@@ -1006,7 +1006,7 @@ async def telnyx_webhook(
             if finished_context:
                 await registrar_evento_llamada(
                     finished_context,
-                    "hangup",
+                    "hangup" if finished_context.answered_at_monotonic is not None else "failed",
                     hangup_cause=event_payload.get("hangup_cause"),
                     termination_source="provider",
                     termination_reason=finished_context.hangup_reason,
