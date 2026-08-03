@@ -4,6 +4,7 @@ import asyncio
 import audioop
 import secrets
 import uuid
+from pathlib import Path
 from time import monotonic
 
 import httpx
@@ -12,6 +13,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
+from starlette.websockets import WebSocketState
 
 from call_context import CallContextStore
 from call_duration import closing_deadlines
@@ -75,6 +77,10 @@ MAX_CALL_SECONDS = 180
 # Margen acotado para no interrumpir una frase de cierre ya enviada a Gemini.
 # No hay polling: cada espera ocurre una vez por etapa de cierre.
 CLOSING_AUDIO_TIMEOUT_SECONDS = 12
+CONTINGENCY_AUDIO_PATH = Path(__file__).resolve().parent / "audio" / "servicio_temporalmente_no_disponible_8k.pcmu"
+PCMU_PACKET_BYTES = 160
+CONTINGENCY_AUDIO_MAX_SECONDS = 9
+PCMU_PACKET_SECONDS = 0.02
 
 # Aquí se guardan los temporizadores activos.
 TAREAS_CORTE = {}
@@ -169,6 +175,20 @@ async def registrar_evento_llamada(
     )
 
 
+def _detalles_terminales(context) -> tuple[str, str | None]:
+    """Conserva en el callback final la causa interna cuando existe."""
+    source = context.failure_provider or context.termination_source or "provider"
+    if context.failure_code and context.failure_stage:
+        return source, f"{context.failure_code}:{context.failure_stage}"
+    return source, context.hangup_reason
+
+
+def _tipo_evento_terminal(context) -> str:
+    return "failed" if context.failure_code else (
+        "hangup" if context.answered_at_monotonic is not None else "failed"
+    )
+
+
 # ---------------------------------------------------------
 # CONTROL DE DURACIÓN DE LAS LLAMADAS
 # ---------------------------------------------------------
@@ -223,6 +243,52 @@ async def colgar_llamada_telnyx(
             "ERROR al intentar colgar la llamada: "
             f"{type(error).__name__}"
         )
+
+
+async def _enviar_paquete_pcmu_a_telnyx(websocket: WebSocket, paquete: bytes) -> None:
+    """Envía un paquete PCMU crudo usando el formato de media ya establecido."""
+    await websocket.send_json(
+        {
+            "event": "media",
+            "media": {"payload": base64.b64encode(paquete).decode("ascii")},
+        }
+    )
+
+
+async def reproducir_audio_contingencia_telnyx(websocket: WebSocket) -> bool:
+    """Reproduce una vez el aviso PCMU local, con límite total y sin reintentos."""
+    if getattr(websocket, "client_state", None) != WebSocketState.CONNECTED:
+        print("Audio de contingencia omitido: WebSocket Telnyx no está abierto.")
+        return False
+    try:
+        audio_pcmu = CONTINGENCY_AUDIO_PATH.read_bytes()
+    except OSError as error:
+        print(f"Audio de contingencia no disponible: {type(error).__name__}.")
+        return False
+
+    deadline = monotonic() + CONTINGENCY_AUDIO_MAX_SECONDS
+    try:
+        for offset in range(0, len(audio_pcmu), PCMU_PACKET_BYTES):
+            if monotonic() >= deadline:
+                break
+            paquete = audio_pcmu[offset:offset + PCMU_PACKET_BYTES]
+            if len(paquete) < PCMU_PACKET_BYTES:
+                paquete += b"\xff" * (PCMU_PACKET_BYTES - len(paquete))
+            await _enviar_paquete_pcmu_a_telnyx(websocket, paquete)
+            if offset + PCMU_PACKET_BYTES < len(audio_pcmu):
+                await asyncio.sleep(PCMU_PACKET_SECONDS)
+        return True
+    except Exception as error:
+        print(f"Error seguro al reproducir audio de contingencia: {type(error).__name__}.")
+        return False
+
+
+async def manejar_fallo_gemini(websocket: WebSocket, call_control_id: str, stage: str) -> None:
+    """Cierra una llamada una sola vez ante un fallo de conexión o stream Gemini."""
+    if not CALL_CONTEXTS.begin_gemini_failure(call_control_id, stage):
+        return
+    await reproducir_audio_contingencia_telnyx(websocket)
+    await colgar_llamada_telnyx(call_control_id)
 
 
 def _seconds_until(deadline: float) -> float:
@@ -1018,12 +1084,13 @@ async def telnyx_webhook(
             )
 
             if finished_context:
+                termination_source, termination_reason = _detalles_terminales(finished_context)
                 await registrar_evento_llamada(
                     finished_context,
-                    "hangup" if finished_context.answered_at_monotonic is not None else "failed",
+                    _tipo_evento_terminal(finished_context),
                     hangup_cause=event_payload.get("hangup_cause"),
-                    termination_source=finished_context.termination_source or "provider",
-                    termination_reason=finished_context.hangup_reason,
+                    termination_source=termination_source,
+                    termination_reason=termination_reason,
                 )
 
             if (
@@ -1444,26 +1511,7 @@ async def enviar_audio_gemini_a_telnyx(
                             :tamano_paquete
                         ]
 
-                        paquete_base64 = (
-                            base64.b64encode(
-                                paquete
-                            ).decode(
-                                "ascii"
-                            )
-                        )
-
-                        await (
-                            websocket.send_json(
-                                {
-                                    "event": "media",
-                                    "media": {
-                                        "payload": (
-                                            paquete_base64
-                                        )
-                                    },
-                                }
-                            )
-                        )
+                        await _enviar_paquete_pcmu_a_telnyx(websocket, paquete)
 
             # Mandar el audio que quede
             # cuando Gemini termine el turno.
@@ -1474,18 +1522,7 @@ async def enviar_audio_gemini_a_telnyx(
                     if faltan > 0:
                         buffer_pcmu.extend(b"\xff" * faltan)
 
-                    paquete_base64 = base64.b64encode(
-                        bytes(buffer_pcmu)
-                    ).decode("ascii")
-
-                    await websocket.send_json(
-                        {
-                            "event": "media",
-                            "media": {
-                                "payload": paquete_base64,
-                            },
-                        }
-                    )
+                    await _enviar_paquete_pcmu_a_telnyx(websocket, bytes(buffer_pcmu))
                     buffer_pcmu.clear()
 
                 closing_phase = CALL_CONTEXTS.complete_closure_turn(
@@ -1523,6 +1560,9 @@ async def websocket_audio_telnyx(
     )
 
     call_control_id = None
+    gemini_connection_started = False
+    gemini_connected = False
+    gemini_stream_failed = False
 
     try:
         call_context = await recibir_inicio_telnyx(websocket)
@@ -1591,6 +1631,7 @@ async def websocket_audio_telnyx(
         if function_declarations:
             configuracion["tools"] = [{"function_declarations": function_declarations}]
 
+        gemini_connection_started = True
         async with (
             cliente_gemini.aio.live.connect(
                 model=GEMINI_MODEL,
@@ -1602,6 +1643,7 @@ async def websocket_audio_telnyx(
                 "Sesión de Gemini Live "
                 "conectada."
             )
+            gemini_connected = True
             CALL_CONTEXTS.mark_runtime_ready(call_control_id, True)
 
             # El agente inicia hablando; en salida usa el saludo de prospección.
@@ -1614,9 +1656,11 @@ async def websocket_audio_telnyx(
                 "reglas definidas en tus instrucciones. Si no existe un saludo específico, preséntate "
                 "brevemente y pregunta cómo puedes ayudar."
             )
-            await session.send_realtime_input(
-                text=opening_instruction
-            )
+            try:
+                await session.send_realtime_input(text=opening_instruction)
+            except Exception:
+                gemini_stream_failed = True
+                raise
 
             tarea_entrada = (
                 asyncio.create_task(
@@ -1672,8 +1716,14 @@ async def websocket_audio_telnyx(
             for tarea in terminadas:
                 error = tarea.exception()
 
+                if tarea is tarea_salida:
+                    gemini_stream_failed = True
                 if error:
+                    if tarea is tarea_cierre:
+                        gemini_stream_failed = True
                     raise error
+                if tarea is tarea_salida:
+                    raise RuntimeError("El stream de salida de Gemini terminó inesperadamente.")
 
     except WebSocketDisconnect:
         print(
@@ -1681,11 +1731,22 @@ async def websocket_audio_telnyx(
             "el WebSocket."
         )
 
+    except asyncio.CancelledError:
+        raise
+
     except Exception as error:
         print(
             "ERROR en el puente Telnyx-Gemini: "
             f"{type(error).__name__}"
         )
+        if call_control_id and gemini_connection_started and (
+            not gemini_connected or gemini_stream_failed
+        ):
+            await manejar_fallo_gemini(
+                websocket,
+                call_control_id,
+                "stream" if gemini_connected else "connect",
+            )
 
     finally:
         if call_control_id:

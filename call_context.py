@@ -25,6 +25,10 @@ class CallContext:
     timer_state: str = "pending"
     hangup_reason: str | None = None
     termination_source: str | None = None
+    failure_provider: str | None = None
+    failure_code: str | None = None
+    failure_stage: str | None = None
+    gemini_failure_handled: bool = False
     answered_at_monotonic: float | None = None
     runtime_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     closure_turn_finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -249,6 +253,19 @@ class CallContextStore:
             return False
         context.termination_source = source
         context.hangup_reason = self._clean_optional(reason) or "unknown"
+        return True
+
+    def begin_gemini_failure(self, call_control_id: str, stage: str) -> bool:
+        """Reserva un único cierre de contingencia por fallo de Gemini."""
+        context = self.get(call_control_id=call_control_id)
+        if context is None or context.gemini_failure_handled or stage not in {"connect", "stream"}:
+            return False
+        context.gemini_failure_handled = True
+        context.failure_provider = "gemini"
+        context.failure_code = "gemini_failed"
+        context.failure_stage = stage
+        context.termination_source = "gemini"
+        context.hangup_reason = "gemini_failed"
         return True
 
     @property
